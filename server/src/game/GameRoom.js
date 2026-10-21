@@ -144,10 +144,6 @@ export class GameRoom {
     player.yaw = input.yaw;
     player.pitch = input.pitch;
 
-    if (this.state.phase === 'BUY_PHASE' || this.state.phase !== 'ROUND_ACTIVE') {
-      return;
-    }
-
     const speed = GAME_CONSTANTS.MOVE_SPEED *
       (input.crouch ? GAME_CONSTANTS.CROUCH_SPEED_FACTOR : input.walk ? GAME_CONSTANTS.WALK_SPEED_FACTOR : 1.0);
 
@@ -169,6 +165,9 @@ export class GameRoom {
     const radius = GAME_CONSTANTS.PLAYER_RADIUS;
     for (const obj of this.mapData.objects) {
       if (!obj.collision) continue;
+      // Walkable surfaces (floors and ceilings) must not block horizontal movement!
+      if (obj.type === 'floor' || obj.type === 'ceiling') continue;
+
       const minX = obj.position[0] - obj.scale[0] / 2 - radius;
       const maxX = obj.position[0] + obj.scale[0] / 2 + radius;
       const minZ = obj.position[2] - obj.scale[2] / 2 - radius;
@@ -178,7 +177,8 @@ export class GameRoom {
       const objMinY = obj.position[1] - obj.scale[1] / 2;
       const objMaxY = obj.position[1] + obj.scale[1] / 2;
 
-      if (pY >= objMinY && pY <= objMaxY + 1.8) {
+      // Check obstacle height (must be higher than step height 0.35m)
+      if (objMaxY > pY + 0.35 && objMinY < pY + GAME_CONSTANTS.PLAYER_HEIGHT) {
         if (finalX > minX && finalX < maxX && finalZ > minZ && finalZ < maxZ) {
           const prevX = player.position[0];
           const prevZ = player.position[2];
@@ -196,6 +196,8 @@ export class GameRoom {
 
     player.position[0] = finalX;
     player.position[2] = finalZ;
+    player.velocity[0] = dx * GAME_CONSTANTS.SERVER_TICK_RATE;
+    player.velocity[2] = dz * GAME_CONSTANTS.SERVER_TICK_RATE;
 
     if (input.jump && player.position[1] <= 0.6) {
       player.velocity[1] = GAME_CONSTANTS.JUMP_IMPULSE;

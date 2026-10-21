@@ -120,7 +120,33 @@ export default function App() {
             allPlayersRef.current = ss.players;
             const myId = localPlayerIdRef.current;
             if (myId && ss.players[myId]) {
-              localPlayerStateRef.current = ss.players[myId];
+              const serverPlayer = ss.players[myId];
+              const cur = localPlayerStateRef.current;
+              if (cur && cur.isAlive) {
+                // Smoothly reconcile client-predicted position with authoritative server position
+                const sPos = serverPlayer.position;
+                const distSq = (sPos[0] - cur.position[0]) ** 2 + (sPos[2] - cur.position[2]) ** 2;
+                if (distSq > 4.0) {
+                  cur.position[0] = sPos[0];
+                  cur.position[2] = sPos[2];
+                } else {
+                  cur.position[0] = cur.position[0] * 0.75 + sPos[0] * 0.25;
+                  cur.position[2] = cur.position[2] * 0.75 + sPos[2] * 0.25;
+                }
+                cur.position[1] = sPos[1];
+                cur.health = serverPlayer.health;
+                cur.armor = serverPlayer.armor;
+                cur.money = serverPlayer.money;
+                cur.ammoInClip = serverPlayer.ammoInClip;
+                cur.reserveAmmo = serverPlayer.reserveAmmo;
+                cur.activeWeaponId = serverPlayer.activeWeaponId;
+                cur.inventory = serverPlayer.inventory;
+                cur.kills = serverPlayer.kills;
+                cur.deaths = serverPlayer.deaths;
+                cur.isAlive = serverPlayer.isAlive;
+              } else {
+                localPlayerStateRef.current = { ...serverPlayer };
+              }
             }
             setServerState(ss);
             break;
@@ -269,6 +295,28 @@ export default function App() {
         setSpread(controller.spread);
       }
 
+      // Client-side prediction for instant zero-latency movement
+      const lp = localPlayerStateRef.current;
+      if (lp && lp.isAlive) {
+        lp.yaw = controller.yaw;
+        lp.pitch = controller.pitch;
+
+        if (input.forward !== 0 || input.right !== 0) {
+          const moveSpeed = 7.0 * (input.crouch ? 0.45 : input.walk ? 0.52 : 1.0);
+          const cosY = Math.cos(controller.yaw);
+          const sinY = Math.sin(controller.yaw);
+          const cdx = (input.forward * -sinY + input.right * cosY) * moveSpeed * dt;
+          const cdz = (input.forward * -cosY + input.right * -sinY) * moveSpeed * dt;
+          lp.position[0] += cdx;
+          lp.position[2] += cdz;
+          lp.velocity[0] = cdx / dt;
+          lp.velocity[2] = cdz / dt;
+        } else {
+          lp.velocity[0] = 0;
+          lp.velocity[2] = 0;
+        }
+      }
+
       // Send input to server
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && !isPaused && !buyMenuOpen) {
         wsRef.current.send(JSON.stringify({
@@ -342,6 +390,10 @@ export default function App() {
 
   // Join Action
   const handleJoinGame = (name: string, team: Team) => {
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+    window.focus();
     setPlayerName(name);
     setSelectedTeam(team);
     playerNameRef.current = name;
@@ -351,6 +403,10 @@ export default function App() {
   };
 
   const handleSoloPractice = (name: string, team: Team) => {
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+    window.focus();
     setPlayerName(name);
     setSelectedTeam(team);
     playerNameRef.current = name;

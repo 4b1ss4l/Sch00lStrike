@@ -96,3 +96,48 @@ test('Round win conditions and rewards update scores correctly', () => {
   assert.equal(room.state.phase, 'ROUND_END');
   assert.ok(p1.money > 800, 'Winning team should receive economy reward');
 });
+
+test('WASD input updates player position and is not blocked by floors', () => {
+  const room = new GameRoom();
+  const p1 = room.addPlayer('test_p1', 'Player1', 'INSPECTORS');
+
+  const startX = p1.position[0];
+  const startZ = p1.position[2];
+
+  // Press W (forward = 1)
+  room.handleInput(p1.id, {
+    seq: 1,
+    forward: 1,
+    right: 0,
+    jump: false,
+    crouch: false,
+    walk: false,
+    yaw: 0,
+    pitch: 0,
+    shooting: false,
+    activeWeaponId: 'highlighter_pistol',
+  });
+
+  // Facing yaw = 0, moving forward should change Z (specifically -cos(0) = -1)
+  assert.notEqual(p1.position[2], startZ, 'Player Z position should change when moving forward');
+  assert.ok(p1.position[2] < startZ, 'Moving forward with yaw 0 should move negative Z');
+
+  // Press D (right = 1, strafe right)
+  const afterZ = p1.position[2];
+  room.handleInput(p1.id, {
+    seq: 2,
+    forward: 0,
+    right: 1,
+    jump: false,
+    crouch: false,
+    walk: false,
+    yaw: 0,
+    pitch: 0,
+    shooting: false,
+    activeWeaponId: 'highlighter_pistol',
+  });
+
+  assert.notEqual(p1.position[0], startX, 'Player X position should change when strafing right');
+  assert.ok(p1.position[0] > startX, 'Strafing right with yaw 0 should move positive X');
+});
+

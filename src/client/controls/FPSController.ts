@@ -35,6 +35,7 @@ export class FPSController {
     window.addEventListener('mousemove', this.onMouseMove);
     document.addEventListener('pointerlockchange', this.onPointerLockChange);
     window.addEventListener('contextmenu', this.onContextMenu);
+    window.addEventListener('blur', this.onBlur);
   }
 
   public setCallbacks(callbacks: {
@@ -62,6 +63,11 @@ export class FPSController {
       document.exitPointerLock();
     }
   }
+
+  private onBlur = () => {
+    this.keys = {};
+    this.isShooting = false;
+  };
 
   private onPointerLockChange = () => {
     this.isLocked = document.pointerLockElement === this.element;
@@ -112,30 +118,48 @@ export class FPSController {
   };
 
   private onKeyDown = (e: KeyboardEvent) => {
-    this.keys[e.code] = true;
+    // If typing in an input element or textarea, don't capture game keys
+    const tag = (e.target as HTMLElement)?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA') {
+      return;
+    }
 
-    if (e.code === 'KeyR') {
+    if (e.code) this.keys[e.code] = true;
+    if (e.key) {
+      this.keys[e.key] = true;
+      this.keys[e.key.toLowerCase()] = true;
+      this.keys[e.key.toUpperCase()] = true;
+    }
+
+    const keyLower = e.key ? e.key.toLowerCase() : '';
+
+    if (e.code === 'KeyR' || keyLower === 'r') {
       if (this.onReloadCallback) this.onReloadCallback();
-    } else if (e.code === 'KeyB') {
+    } else if (e.code === 'KeyB' || keyLower === 'b') {
       if (this.onBuyMenuCallback) this.onBuyMenuCallback();
-    } else if (e.code === 'Tab') {
+    } else if (e.code === 'Tab' || keyLower === 'tab') {
       e.preventDefault();
       if (this.onScoreboardCallback) this.onScoreboardCallback(true);
-    } else if (e.code === 'Digit1') {
+    } else if (e.code === 'Digit1' || e.key === '1') {
       if (this.onWeaponSwitchCallback) this.onWeaponSwitchCallback(1);
-    } else if (e.code === 'Digit2') {
+    } else if (e.code === 'Digit2' || e.key === '2') {
       if (this.onWeaponSwitchCallback) this.onWeaponSwitchCallback(2);
-    } else if (e.code === 'Digit3') {
+    } else if (e.code === 'Digit3' || e.key === '3') {
       if (this.onWeaponSwitchCallback) this.onWeaponSwitchCallback(3);
-    } else if (e.code === 'Digit4') {
+    } else if (e.code === 'Digit4' || e.key === '4') {
       if (this.onWeaponSwitchCallback) this.onWeaponSwitchCallback(4);
     }
   };
 
   private onKeyUp = (e: KeyboardEvent) => {
-    this.keys[e.code] = false;
+    if (e.code) this.keys[e.code] = false;
+    if (e.key) {
+      this.keys[e.key] = false;
+      this.keys[e.key.toLowerCase()] = false;
+      this.keys[e.key.toUpperCase()] = false;
+    }
 
-    if (e.code === 'Tab') {
+    if (e.code === 'Tab' || e.key === 'Tab') {
       if (this.onScoreboardCallback) this.onScoreboardCallback(false);
     }
   };
@@ -152,14 +176,20 @@ export class FPSController {
     let forward = 0;
     let right = 0;
 
-    if (this.keys['KeyW'] || this.keys['ArrowUp']) forward += 1;
-    if (this.keys['KeyS'] || this.keys['ArrowDown']) forward -= 1;
-    if (this.keys['KeyD'] || this.keys['ArrowRight']) right += 1;
-    if (this.keys['KeyA'] || this.keys['ArrowLeft']) right -= 1;
+    const isPressed = (aliases: string[]) => aliases.some((a) => Boolean(this.keys[a]));
 
-    const jump = Boolean(this.keys['Space']);
-    const crouch = Boolean(this.keys['ControlLeft'] || this.keys['KeyC']);
-    const walk = Boolean(this.keys['ShiftLeft']);
+    // Forward: W, ArrowUp, Z (AZERTY)
+    if (isPressed(['KeyW', 'w', 'W', 'ArrowUp', 'KeyZ', 'z', 'Z'])) forward += 1;
+    // Backward: S, ArrowDown
+    if (isPressed(['KeyS', 's', 'S', 'ArrowDown'])) forward -= 1;
+    // Right: D, ArrowRight
+    if (isPressed(['KeyD', 'd', 'D', 'ArrowRight'])) right += 1;
+    // Left: A, ArrowLeft, Q (AZERTY)
+    if (isPressed(['KeyA', 'a', 'A', 'ArrowLeft', 'KeyQ', 'q', 'Q'])) right -= 1;
+
+    const jump = isPressed(['Space', ' ']);
+    const crouch = isPressed(['ControlLeft', 'ControlRight', 'KeyC', 'c', 'C']);
+    const walk = isPressed(['ShiftLeft', 'ShiftRight']);
 
     // Footstep audio trigger when moving on ground
     if ((forward !== 0 || right !== 0) && !crouch) {
@@ -189,5 +219,6 @@ export class FPSController {
     window.removeEventListener('mousemove', this.onMouseMove);
     document.removeEventListener('pointerlockchange', this.onPointerLockChange);
     window.removeEventListener('contextmenu', this.onContextMenu);
+    window.removeEventListener('blur', this.onBlur);
   }
 }

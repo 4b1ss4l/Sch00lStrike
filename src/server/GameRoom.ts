@@ -173,16 +173,7 @@ export class GameRoom {
     player.yaw = input.yaw;
     player.pitch = input.pitch;
 
-    // Movement restriction during BUY_PHASE: allow looking, but freeze position
-    if (this.state.phase === 'BUY_PHASE') {
-      return;
-    }
-
-    if (this.state.phase !== 'ROUND_ACTIVE') {
-      return;
-    }
-
-    // Server-side movement simulation with bounding box collision
+    // Movement calculation
     const speed = GAME_CONSTANTS.MOVE_SPEED *
       (input.crouch ? GAME_CONSTANTS.CROUCH_SPEED_FACTOR : input.walk ? GAME_CONSTANTS.WALK_SPEED_FACTOR : 1.0);
 
@@ -200,32 +191,32 @@ export class GameRoom {
     const halfW = (this.mapData.dimensions.width / 2) - 1.5;
     const halfL = (this.mapData.dimensions.length / 2) - 1.5;
 
-    const clampedX = Math.max(-halfW, Math.min(halfW, newX));
-    const clampedZ = Math.max(-halfL, Math.min(halfL, newZ));
-
-    // Simple AABB obstacle collision resolution
-    let finalX = clampedX;
-    let finalZ = clampedZ;
+    let finalX = Math.max(-halfW, Math.min(halfW, newX));
+    let finalZ = Math.max(-halfL, Math.min(halfL, newZ));
 
     const radius = GAME_CONSTANTS.PLAYER_RADIUS;
     for (const obj of this.mapData.objects) {
       if (!obj.collision) continue;
-      // Object AABB
+      // Walkable surfaces (floors and ceilings) must not block horizontal movement!
+      if (obj.type === 'floor' || obj.type === 'ceiling') continue;
+
+      // Obstacle AABB
       const minX = obj.position[0] - obj.scale[0] / 2 - radius;
       const maxX = obj.position[0] + obj.scale[0] / 2 + radius;
       const minZ = obj.position[2] - obj.scale[2] / 2 - radius;
       const maxZ = obj.position[2] + obj.scale[2] / 2 + radius;
 
-      // Check if player Y intersects object height
+      // Check if player Y intersects obstacle height (must be higher than step height 0.35m)
       const pY = player.position[1];
       const objMinY = obj.position[1] - obj.scale[1] / 2;
       const objMaxY = obj.position[1] + obj.scale[1] / 2;
 
-      if (pY >= objMinY && pY <= objMaxY + 1.8) {
+      if (objMaxY > pY + 0.35 && objMinY < pY + GAME_CONSTANTS.PLAYER_HEIGHT) {
         if (finalX > minX && finalX < maxX && finalZ > minZ && finalZ < maxZ) {
-          // Slide along axis
           const prevX = player.position[0];
           const prevZ = player.position[2];
+
+          // Allow sliding along open axis
           if (prevX <= minX || prevX >= maxX) {
             finalX = prevX;
           } else if (prevZ <= minZ || prevZ >= maxZ) {
@@ -240,6 +231,8 @@ export class GameRoom {
 
     player.position[0] = finalX;
     player.position[2] = finalZ;
+    player.velocity[0] = dx * GAME_CONSTANTS.SERVER_TICK_RATE;
+    player.velocity[2] = dz * GAME_CONSTANTS.SERVER_TICK_RATE;
 
     // Handle jumping
     if (input.jump && player.position[1] <= 0.6) {
