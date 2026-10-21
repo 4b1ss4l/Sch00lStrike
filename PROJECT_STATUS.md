@@ -38,7 +38,11 @@ Projetar e construir um jogo de tiro em primeira pessoa (FPS) competitivo multip
 ---
 
 ## 4. Arquivos Principais
-- `server.ts`: Servidor Express + WebSocket, endpoints REST (`/api/lan-info`, `/api/map`, `/api/bot/*`) e loop de simulação.
+- `server/src/index.js`: Ponto de entrada nativo Node.js (`node server/src/index.js`) que resolveu o erro `MODULE_NOT_FOUND`, compatível com execução direta e modular.
+- `server/src/game/GameRoom.js`: Motor autoritativo da partida em JavaScript ES modular.
+- `shared/defaultMap.js`: Carregador do mapa padrão com leitura de `maps/school_dust/map.json`.
+- `maps/school_dust/map.json`: Arquivo padrão oficial do mapa SCHOOL_DUST em JSON.
+- `server.ts`: Servidor Express + WebSocket integrado ao Vite Dev Server.
 - `src/server/GameRoom.ts`: Máquina de estados autoritativa dos rounds, cálculo de dano, hitboxes, economia e IA de bots.
 - `src/types/game.ts`: Tipos do protocolo, armas, mapas, jogadores e estados do servidor.
 - `src/shared/weapons.ts`: Tabela centralizada de equipamentos e armas escolares.

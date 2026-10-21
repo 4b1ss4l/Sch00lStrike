@@ -1,0 +1,12 @@
+{
+  "name": "SCHOOL_DUST",
+  "version": "1.0.0",
+  "author": "School Strike Architects",
+  "description": "Mapa oficial escolar com pátio, biblioteca, ginásio e armários.",
+  "formatVersion": "1.0.0",
+  "dimensions": {
+    "width": 90,
+    "length": 90,
+    "height": 12
+  }
+}
