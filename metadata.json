@@ -1,0 +1,6 @@
+{
+  "name": "School Strike",
+  "description": "Competitive multiplayer FPS in browser with school theme (Inspectors vs Rebels), custom school weaponry, Dust-inspired school map, real LAN multiplayer, and integrated 3D map editor.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
