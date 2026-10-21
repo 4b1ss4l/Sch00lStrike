@@ -128,7 +128,7 @@ export const HUD: React.FC<HUDProps> = ({
           </span>
           <span
             className={`text-2xl font-bold tabular-nums ${
-              timer <= 10 && serverState?.phase === 'ROUND_ACTIVE' ? 'animate-pulse text-red-500' : 'text-amber-400'
+              timer <= 10 && serverState?.phase === 'ROUND_ACTIVE' ? 'text-red-500 font-black' : 'text-amber-400'
             }`}
           >
             {formattedTimer}
@@ -186,7 +186,7 @@ export const HUD: React.FC<HUDProps> = ({
           <Heart className="h-6 w-6 text-red-500" />
           <div className="flex flex-col">
             <span className="text-[10px] text-slate-400 uppercase">Vida Escolar</span>
-            <span className={`text-2xl font-black tabular-nums ${localPlayer.health <= 25 ? 'animate-pulse text-red-500' : 'text-emerald-400'}`}>
+            <span className={`text-2xl font-black tabular-nums ${localPlayer.health <= 25 ? 'text-red-500 font-bold' : 'text-emerald-400'}`}>
               {localPlayer.health}
             </span>
           </div>

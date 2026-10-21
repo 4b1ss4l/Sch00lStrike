@@ -54,6 +54,10 @@ export default function App() {
   const wsRef = useRef<WebSocket | null>(null);
   const currentMapDataRef = useRef<SchoolMapData>(DEFAULT_SCHOOL_DUST_MAP);
   const localPlayerStateRef = useRef<PlayerState | undefined>(undefined);
+  const localPlayerIdRef = useRef<string>('');
+  const playerNameRef = useRef<string>(playerName);
+  const selectedTeamRef = useRef<Team>(selectedTeam);
+  const lastSpreadRef = useRef<number>(0.012);
   const allPlayersRef = useRef<Record<string, PlayerState>>({});
   const animFrameIdRef = useRef<number>(0);
 
@@ -92,7 +96,7 @@ export default function App() {
     ws.onopen = () => {
       ws.send(JSON.stringify({
         type: 'join',
-        payload: { name: playerName, team: selectedTeam },
+        payload: { name: playerNameRef.current, team: selectedTeamRef.current },
       }));
     };
 
@@ -103,6 +107,7 @@ export default function App() {
 
         switch (type) {
           case 'init_welcome': {
+            localPlayerIdRef.current = payload.playerId;
             setLocalPlayerId(payload.playerId);
             setServerState(payload.serverState);
             currentMapDataRef.current = payload.mapData;
@@ -112,16 +117,17 @@ export default function App() {
 
           case 'state_snapshot': {
             const ss = payload.serverState as ServerGameState;
-            setServerState(ss);
             allPlayersRef.current = ss.players;
-            if (ss.players[localPlayerId]) {
-              localPlayerStateRef.current = ss.players[localPlayerId];
+            const myId = localPlayerIdRef.current;
+            if (myId && ss.players[myId]) {
+              localPlayerStateRef.current = ss.players[myId];
             }
+            setServerState(ss);
             break;
           }
 
           case 'shoot_event': {
-            renderer.handleShootEvent(payload, localPlayerId);
+            renderer.handleShootEvent(payload, localPlayerIdRef.current);
             break;
           }
 
@@ -258,7 +264,10 @@ export default function App() {
 
       // Update input
       const input = controller.update(dt);
-      setSpread(controller.spread);
+      if (Math.abs(lastSpreadRef.current - controller.spread) > 0.008) {
+        lastSpreadRef.current = controller.spread;
+        setSpread(controller.spread);
+      }
 
       // Send input to server
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && !isPaused && !buyMenuOpen) {
@@ -303,7 +312,7 @@ export default function App() {
         ws.close();
       }
     };
-  }, [appMode, localPlayerId]);
+  }, [appMode]);
 
   // Handle Map Editor Setup when entering 'editor' mode
   useEffect(() => {
@@ -335,6 +344,8 @@ export default function App() {
   const handleJoinGame = (name: string, team: Team) => {
     setPlayerName(name);
     setSelectedTeam(team);
+    playerNameRef.current = name;
+    selectedTeamRef.current = team;
     setAppMode('playing');
     setIsPaused(false);
   };
@@ -342,6 +353,8 @@ export default function App() {
   const handleSoloPractice = (name: string, team: Team) => {
     setPlayerName(name);
     setSelectedTeam(team);
+    playerNameRef.current = name;
+    selectedTeamRef.current = team;
     setAppMode('playing');
     setIsPaused(false);
 

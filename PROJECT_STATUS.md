@@ -33,6 +33,7 @@ Projetar e construir um jogo de tiro em primeira pessoa (FPS) competitivo multip
 - [x] Editor de mapas 3D com ferramentas de criação, transformação, snap de grade e inspetor de propriedades.
 - [x] Validador automático de mapas (regras de spawns por equipe, distâncias mínimas, objetivos A e B).
 - [x] Exportação e importação de mapas em arquivo transferível `.schoolmap` / JSON.
+- [x] Otimização e estabilidade do HUD: correção do ciclo de re-renderização/reconexão WebSocket que causava piscamento dos ícones, remoção de pulsos de animação e desacoplamento do ciclo Three.js.
 - [x] Envio direto de mapas personalizados para o servidor ativo jogar sem reiniciar.
 
 ---
