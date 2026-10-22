@@ -21,6 +21,34 @@ export interface HitResult {
   victimDied?: boolean;
 }
 
+// Ray-box intersection algorithm for authoritative bullet penetration and bot line-of-sight
+export function rayIntersectsAABB(
+  rayOrigin: [number, number, number],
+  rayDir: [number, number, number],
+  boxMin: [number, number, number],
+  boxMax: [number, number, number]
+): number | null {
+  let tmin = -Infinity;
+  let tmax = Infinity;
+
+  for (let i = 0; i < 3; i++) {
+    const d = rayDir[i];
+    const invD = 1.0 / (Math.abs(d) < 1e-7 ? (d >= 0 ? 1e-7 : -1e-7) : d);
+    let t0 = (boxMin[i] - rayOrigin[i]) * invD;
+    let t1 = (boxMax[i] - rayOrigin[i]) * invD;
+    if (invD < 0) {
+      const tmp = t0;
+      t0 = t1;
+      t1 = tmp;
+    }
+    tmin = Math.max(tmin, t0);
+    tmax = Math.min(tmax, t1);
+    if (tmax <= tmin) return null;
+  }
+
+  return tmin > 0 ? tmin : tmax > 0 ? tmax : null;
+}
+
 export class GameRoom {
   public state: ServerGameState;
   public mapData: SchoolMapData;
@@ -30,6 +58,15 @@ export class GameRoom {
   private onKillfeedCallback?: (entry: KillfeedEntry) => void;
   private onShootCallback?: (event: ShootEvent) => void;
   private onMessageCallback?: (text: string, type: 'info' | 'warning' | 'round') => void;
+  private onBombBeepCallback?: (timerRemaining: number) => void;
+  private onBombPlantedCallback?: (site: 'A' | 'B', position: [number, number, number]) => void;
+  private onBombDefusedCallback?: (defuserId: string) => void;
+  private onBombExplodedCallback?: (position: [number, number, number]) => void;
+
+  private lastBombBeepTime: number = 0;
+  private plantHoldProgress: number = 0;
+  private defuseHoldProgress: number = 0;
+  private lastPlayerInputs: Map<string, PlayerInput> = new Map();
 
   constructor(initialMap: SchoolMapData = DEFAULT_SCHOOL_DUST_MAP) {
     this.mapData = initialMap;
@@ -42,6 +79,13 @@ export class GameRoom {
       rebelsScore: 0,
       players: {},
       mapName: initialMap.name,
+      bomb: {
+        isPlanted: false,
+        plantTimer: 45,
+        defuseProgress: 0,
+        isExploded: false,
+        isDefused: false,
+      },
     };
   }
 
@@ -49,10 +93,18 @@ export class GameRoom {
     onKillfeed?: (entry: KillfeedEntry) => void;
     onShoot?: (event: ShootEvent) => void;
     onMessage?: (text: string, type: 'info' | 'warning' | 'round') => void;
+    onBombBeep?: (timerRemaining: number) => void;
+    onBombPlanted?: (site: 'A' | 'B', position: [number, number, number]) => void;
+    onBombDefused?: (defuserId: string) => void;
+    onBombExploded?: (position: [number, number, number]) => void;
   }) {
     this.onKillfeedCallback = callbacks.onKillfeed;
     this.onShootCallback = callbacks.onShoot;
     this.onMessageCallback = callbacks.onMessage;
+    this.onBombBeepCallback = callbacks.onBombBeep;
+    this.onBombPlantedCallback = callbacks.onBombPlanted;
+    this.onBombDefusedCallback = callbacks.onBombDefused;
+    this.onBombExplodedCallback = callbacks.onBombExploded;
   }
 
   public addPlayer(id: string, name: string, team?: Team): PlayerState {
@@ -172,6 +224,15 @@ export class GameRoom {
 
     player.yaw = input.yaw;
     player.pitch = input.pitch;
+    this.lastPlayerInputs.set(id, input);
+
+    // Apply movement simulation
+    const dt = 1 / GAME_CONSTANTS.SERVER_TICK_RATE;
+    this.simulatePlayerMovement(player, input, dt);
+  }
+
+  public simulatePlayerMovement(player: PlayerState, input: PlayerInput, dt: number): void {
+    if (!player.isAlive) return;
 
     // Movement calculation
     const speed = GAME_CONSTANTS.MOVE_SPEED *
@@ -181,8 +242,8 @@ export class GameRoom {
     const sinY = Math.sin(player.yaw);
 
     // Forward/back and strafe
-    const dx = (input.forward * -sinY + input.right * cosY) * speed * (1 / GAME_CONSTANTS.SERVER_TICK_RATE);
-    const dz = (input.forward * -cosY + input.right * -sinY) * speed * (1 / GAME_CONSTANTS.SERVER_TICK_RATE);
+    const dx = (input.forward * -sinY + input.right * cosY) * speed * dt;
+    const dz = (input.forward * -cosY + input.right * -sinY) * speed * dt;
 
     const newX = player.position[0] + dx;
     const newZ = player.position[2] + dz;
@@ -231,8 +292,8 @@ export class GameRoom {
 
     player.position[0] = finalX;
     player.position[2] = finalZ;
-    player.velocity[0] = dx * GAME_CONSTANTS.SERVER_TICK_RATE;
-    player.velocity[2] = dz * GAME_CONSTANTS.SERVER_TICK_RATE;
+    player.velocity[0] = dx / (dt || 0.033);
+    player.velocity[2] = dz / (dt || 0.033);
 
     // Handle jumping
     if (input.jump && player.position[1] <= 0.6) {
@@ -240,19 +301,24 @@ export class GameRoom {
     }
   }
 
-  public handleShoot(id: string, shootData: { origin: [number, number, number]; direction: [number, number, number]; weaponId: string }): HitResult {
+  public handleShoot(id: string, shootData: { origin: [number, number, number]; direction: [number, number, number]; weaponId?: string }): HitResult {
     const player = this.state.players[id];
-    if (!player || !player.isAlive || this.state.phase !== 'ROUND_ACTIVE') {
+    if (!player || !player.isAlive || (this.state.phase !== 'ROUND_ACTIVE' && this.state.phase !== 'WARMUP')) {
       return { hit: false, damage: 0, isHeadshot: false };
     }
 
-    const weapon = WEAPONS[shootData.weaponId] || WEAPONS[player.activeWeaponId];
+    const activeWeaponKey = (shootData.weaponId && WEAPONS[shootData.weaponId])
+      ? shootData.weaponId
+      : player.activeWeaponId && WEAPONS[player.activeWeaponId]
+      ? player.activeWeaponId
+      : 'highlighter_pistol';
+    const weapon = WEAPONS[activeWeaponKey];
     if (!weapon) return { hit: false, damage: 0, isHeadshot: false };
 
     // Fire rate check
     const now = Date.now();
     const minInterval = 1000 / weapon.fireRate;
-    if (now - player.lastShootTime < minInterval * 0.85) {
+    if (now - player.lastShootTime < minInterval * 0.82) {
       return { hit: false, damage: 0, isHeadshot: false };
     }
 
@@ -265,18 +331,48 @@ export class GameRoom {
     }
     player.lastShootTime = now;
 
-    // Raycast against all enemy players
-    const [ox, oy, oz] = shootData.origin;
+    // Authoritative origin calculation (with slight tolerance for client prediction)
+    const serverEyeHeight = player.position[1] + GAME_CONSTANTS.PLAYER_EYE_HEIGHT;
+    const ox = player.position[0];
+    const oy = Math.abs(shootData.origin[1] - serverEyeHeight) < 0.65 ? shootData.origin[1] : serverEyeHeight;
+    const oz = player.position[2];
+
     const [dx, dy, dz] = shootData.direction;
     const dirLen = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
     const ndx = dx / dirLen;
     const ndy = dy / dirLen;
     const ndz = dz / dirLen;
 
-    let closestHitDist = weapon.range;
+    // Check closest solid obstacle intersection along the ray to block shots through walls
+    let closestWallDist = weapon.range;
+    for (const obj of this.mapData.objects) {
+      if (!obj.collision || obj.type === 'floor' || obj.type === 'ceiling') continue;
+
+      const halfX = obj.scale[0] / 2;
+      const halfY = obj.scale[1] / 2;
+      const halfZ = obj.scale[2] / 2;
+      const boxMin: [number, number, number] = [
+        obj.position[0] - halfX,
+        obj.position[1] - halfY,
+        obj.position[2] - halfZ,
+      ];
+      const boxMax: [number, number, number] = [
+        obj.position[0] + halfX,
+        obj.position[1] + halfY,
+        obj.position[2] + halfZ,
+      ];
+
+      const tHit = rayIntersectsAABB([ox, oy, oz], [ndx, ndy, ndz], boxMin, boxMax);
+      if (tHit !== null && tHit > 0 && tHit < closestWallDist) {
+        closestWallDist = tHit;
+      }
+    }
+
+    let closestHitDist = Math.min(weapon.range, closestWallDist);
     let hitVictim: PlayerState | null = null;
     let isHeadshotHit = false;
 
+    // Raycast against all enemy players (only valid if closer than any solid wall)
     for (const victim of Object.values(this.state.players)) {
       if (!victim.isAlive || victim.id === player.id || victim.team === player.team) continue;
 
@@ -309,12 +405,18 @@ export class GameRoom {
     }
 
     // Broadcast shoot event for visuals & audio
+    const hitPoint: [number, number, number] = [
+      ox + ndx * closestHitDist,
+      oy + ndy * closestHitDist,
+      oz + ndz * closestHitDist,
+    ];
+
     const shootEvent: ShootEvent = {
       shooterId: player.id,
       weaponId: weapon.id,
-      origin: shootData.origin,
+      origin: [ox, oy, oz],
       direction: [ndx, ndy, ndz],
-      hitPoint: hitVictim ? [ox + ndx * closestHitDist, oy + ndy * closestHitDist, oz + ndz * closestHitDist] : undefined,
+      hitPoint,
       hitPlayerId: hitVictim ? hitVictim.id : undefined,
       isHeadshot: isHeadshotHit,
     };
@@ -463,9 +565,9 @@ export class GameRoom {
     return { success: true, message: `${weapon.portugueseName} adquirido!` };
   }
 
-  public tick(): void {
+  public tick(mockDt?: number): void {
     const now = Date.now();
-    const dt = Math.min((now - this.lastTickTime) / 1000, 0.05);
+    const dt = mockDt !== undefined ? mockDt : Math.min((now - this.lastTickTime) / 1000, 0.05);
     this.lastTickTime = now;
 
     // Process Reload completion
@@ -491,10 +593,15 @@ export class GameRoom {
         }
       }
 
-      // Bot AI simple behavior
+      // Bot AI
       if (player.isBot && player.isAlive && this.state.phase === 'ROUND_ACTIVE') {
         this.tickBotAI(player, dt, now);
       }
+    }
+
+    // Process Bomb Planting & Defusing during active rounds
+    if (this.state.phase === 'ROUND_ACTIVE') {
+      this.updateBombMechanics(dt, now);
     }
 
     // State machine timers
@@ -508,10 +615,141 @@ export class GameRoom {
     }
   }
 
+  private updateBombMechanics(dt: number, now: number): void {
+    const bomb = this.state.bomb;
+
+    // If bomb is NOT yet planted: check if any Rebel is planting in Bombsite A or B
+    if (!bomb.isPlanted && !bomb.isExploded && !bomb.isDefused) {
+      let isAnyRebelPlanting = false;
+
+      for (const player of Object.values(this.state.players)) {
+        if (!player.isAlive || player.team !== 'REBELS') continue;
+        const input = this.lastPlayerInputs.get(player.id);
+        if (!input || !input.interact) continue;
+
+        // Check if inside Bombsite A or B
+        const site = this.getBombsiteAtPosition(player.position);
+        if (site) {
+          isAnyRebelPlanting = true;
+          this.plantHoldProgress += dt / 3.0; // 3 seconds to plant
+          if (this.plantHoldProgress >= 1.0) {
+            // Bomb planted!
+            bomb.isPlanted = true;
+            bomb.site = site;
+            bomb.position = [player.position[0], 0.2, player.position[2]];
+            bomb.plantedAt = now;
+            bomb.planterId = player.id;
+            bomb.plantTimer = 45;
+            this.plantHoldProgress = 0;
+
+            if (this.onBombPlantedCallback) {
+              this.onBombPlantedCallback(site, bomb.position);
+            }
+            if (this.onMessageCallback) {
+              this.onMessageCallback(`A Mochila Bombástica foi armada no Ponto ${site}! (45s para detonação)`, 'round');
+            }
+            break;
+          }
+        }
+      }
+
+      if (!isAnyRebelPlanting) {
+        this.plantHoldProgress = Math.max(0, this.plantHoldProgress - dt * 1.5);
+      }
+    }
+
+    // If bomb IS planted: tick countdown, beep, and check defusing
+    if (bomb.isPlanted && !bomb.isExploded && !bomb.isDefused && bomb.position) {
+      bomb.plantTimer -= dt;
+
+      // Accelerating beep
+      let beepInterval = 1.0;
+      if (bomb.plantTimer <= 4) beepInterval = 0.15;
+      else if (bomb.plantTimer <= 10) beepInterval = 0.3;
+      else if (bomb.plantTimer <= 20) beepInterval = 0.6;
+
+      if (now - this.lastBombBeepTime >= beepInterval * 1000) {
+        this.lastBombBeepTime = now;
+        if (this.onBombBeepCallback) {
+          this.onBombBeepCallback(bomb.plantTimer);
+        }
+      }
+
+      // Check if an Inspector is defusing
+      let isAnyInspectorDefusing = false;
+      const [bx, by, bz] = bomb.position;
+
+      for (const player of Object.values(this.state.players)) {
+        if (!player.isAlive || player.team !== 'INSPECTORS') continue;
+        const input = this.lastPlayerInputs.get(player.id);
+        if (!input || !input.interact) continue;
+
+        const dx = player.position[0] - bx;
+        const dz = player.position[2] - bz;
+        const dist = Math.sqrt(dx * dx + dz * dz);
+        if (dist <= 2.8) {
+          isAnyInspectorDefusing = true;
+          this.defuseHoldProgress += dt / 5.0; // 5 seconds defuse
+          bomb.defuseProgress = Math.min(1.0, this.defuseHoldProgress);
+          bomb.defuserId = player.id;
+
+          if (this.defuseHoldProgress >= 1.0) {
+            // Defused!
+            bomb.isDefused = true;
+            if (this.onBombDefusedCallback) {
+              this.onBombDefusedCallback(player.id);
+            }
+            this.endRound('INSPECTORS', 'A Mochila Bombástica foi desarmada com sucesso pelos Inspetores!');
+            break;
+          }
+        }
+      }
+
+      if (!isAnyInspectorDefusing) {
+        this.defuseHoldProgress = Math.max(0, this.defuseHoldProgress - dt * 2.0);
+        bomb.defuseProgress = this.defuseHoldProgress;
+      }
+
+      // Detonation check
+      if (bomb.plantTimer <= 0) {
+        bomb.isExploded = true;
+        if (this.onBombExplodedCallback) {
+          this.onBombExplodedCallback(bomb.position);
+        }
+        this.endRound('REBELS', 'A Mochila Bombástica detonou! Vitória dos Rebeldes do Recreio!');
+      }
+    }
+  }
+
+  public getBombsiteAtPosition(pos: [number, number, number]): 'A' | 'B' | null {
+    for (const obj of this.mapData.objectives) {
+      if (obj.type === 'BOMBSITE_A' || obj.type === 'BOMBSITE_B') {
+        const dx = Math.abs(pos[0] - obj.position[0]);
+        const dz = Math.abs(pos[2] - obj.position[2]);
+        const halfX = obj.scale[0] / 2 + 1.2;
+        const halfZ = obj.scale[2] / 2 + 1.2;
+        if (dx <= halfX && dz <= halfZ) {
+          return obj.type === 'BOMBSITE_A' ? 'A' : 'B';
+        }
+      }
+    }
+    return null;
+  }
+
   private tickBotAI(bot: PlayerState, dt: number, now: number): void {
+    // Objective orientation: if bomb is planted and bot is Inspector, move towards bomb
+    const bomb = this.state.bomb;
+    let targetPos: [number, number] | null = null;
+
+    if (bomb.isPlanted && bomb.position) {
+      if (bot.team === 'INSPECTORS') {
+        targetPos = [bomb.position[0], bomb.position[2]];
+      }
+    }
+
     // Find closest enemy
     let closestEnemy: PlayerState | null = null;
-    let minDist = 40;
+    let minDist = 45;
 
     for (const enemy of Object.values(this.state.players)) {
       if (enemy.id === bot.id || enemy.team === bot.team || !enemy.isAlive) continue;
@@ -530,22 +768,46 @@ export class GameRoom {
       const dz = closestEnemy.position[2] - bot.position[2];
       bot.yaw = Math.atan2(-dx, -dz);
 
-      // Advance if > 8m, retreat if < 4m
-      if (minDist > 10) {
+      // Check solid wall line-of-sight before shooting
+      const shootOrigin: [number, number, number] = [bot.position[0], bot.position[1] + 1.12, bot.position[2]];
+      const shootDir: [number, number, number] = [-Math.sin(bot.yaw), 0.04, -Math.cos(bot.yaw)];
+
+      let wallInBetween = false;
+      for (const obj of this.mapData.objects) {
+        if (!obj.collision || obj.type === 'floor' || obj.type === 'ceiling') continue;
+        const halfX = obj.scale[0] / 2;
+        const halfY = obj.scale[1] / 2;
+        const halfZ = obj.scale[2] / 2;
+        const boxMin: [number, number, number] = [obj.position[0] - halfX, obj.position[1] - halfY, obj.position[2] - halfZ];
+        const boxMax: [number, number, number] = [obj.position[0] + halfX, obj.position[1] + halfY, obj.position[2] + halfZ];
+        const tHit = rayIntersectsAABB(shootOrigin, shootDir, boxMin, boxMax);
+        if (tHit !== null && tHit > 0 && tHit < minDist) {
+          wallInBetween = true;
+          break;
+        }
+      }
+
+      // Advance if > 9m, retreat if < 4m
+      if (minDist > 9) {
         bot.position[0] += Math.sin(bot.yaw) * GAME_CONSTANTS.MOVE_SPEED * 0.5 * dt;
         bot.position[2] += Math.cos(bot.yaw) * GAME_CONSTANTS.MOVE_SPEED * 0.5 * dt;
       }
 
-      // Shoot bursts
-      if (now - bot.lastShootTime > 400 && Math.random() < 0.6) {
-        const shootOrigin: [number, number, number] = [bot.position[0], bot.position[1] + 1.6, bot.position[2]];
-        const shootDir: [number, number, number] = [-Math.sin(bot.yaw), 0.05, -Math.cos(bot.yaw)];
+      // Shoot bursts only if direct LOS exists without solid wall obstruction
+      if (!wallInBetween && now - bot.lastShootTime > 400 && Math.random() < 0.65) {
         this.handleShoot(bot.id, {
           origin: shootOrigin,
           direction: shootDir,
           weaponId: bot.activeWeaponId,
         });
       }
+    } else if (targetPos) {
+      // Move toward objective
+      const dx = targetPos[0] - bot.position[0];
+      const dz = targetPos[1] - bot.position[2];
+      bot.yaw = Math.atan2(-dx, -dz);
+      bot.position[0] += Math.sin(bot.yaw) * GAME_CONSTANTS.MOVE_SPEED * 0.45 * dt;
+      bot.position[2] += Math.cos(bot.yaw) * GAME_CONSTANTS.MOVE_SPEED * 0.45 * dt;
     }
   }
 
@@ -559,8 +821,10 @@ export class GameRoom {
         this.onMessageCallback('Sinal tocou! Round iniciado!', 'round');
       }
     } else if (this.state.phase === 'ROUND_ACTIVE') {
-      // Time expired: Inspectors win defense
-      this.endRound('INSPECTORS', 'Tempo esgotado! Os Inspetores mantiveram a ordem!');
+      // If bomb is planted, round timer expiring does NOT end round: bomb detonation timer takes over!
+      if (!this.state.bomb.isPlanted) {
+        this.endRound('INSPECTORS', 'Tempo esgotado! Os Inspetores mantiveram a ordem!');
+      }
     } else if (this.state.phase === 'ROUND_END') {
       // Check match victory
       if (this.state.inspectorsScore >= GAME_CONSTANTS.ROUNDS_TO_WIN) {
@@ -588,7 +852,6 @@ export class GameRoom {
     const aliveInspectors = Object.values(this.state.players).filter(p => p.team === 'INSPECTORS' && p.isAlive).length;
     const aliveRebels = Object.values(this.state.players).filter(p => p.team === 'REBELS' && p.isAlive).length;
 
-    // Both teams need to have had players
     const totalInspectors = this.getTeamCount('INSPECTORS');
     const totalRebels = this.getTeamCount('REBELS');
 
@@ -596,7 +859,15 @@ export class GameRoom {
       if (aliveInspectors === 0) {
         this.endRound('REBELS', 'Equipe dos Inspetores eliminada!');
       } else if (aliveRebels === 0) {
-        this.endRound('INSPECTORS', 'Rebeldes do Recreio eliminados!');
+        // If bomb is NOT planted, elimination is immediate CT victory
+        // If bomb IS planted, CT still has to defuse!
+        if (!this.state.bomb.isPlanted) {
+          this.endRound('INSPECTORS', 'Rebeldes do Recreio eliminados!');
+        } else {
+          if (this.onMessageCallback) {
+            this.onMessageCallback('Todos os Rebeldes eliminados! Desarme a Mochila antes que detone!', 'warning');
+          }
+        }
       }
     }
   }
@@ -605,6 +876,27 @@ export class GameRoom {
     this.state.phase = 'BUY_PHASE';
     this.roundTimerSeconds = GAME_CONSTANTS.BUY_PHASE_SECONDS;
     this.state.timer = this.roundTimerSeconds;
+    this.plantHoldProgress = 0;
+    this.defuseHoldProgress = 0;
+
+    // Reset bomb state
+    this.state.bomb = {
+      isPlanted: false,
+      plantTimer: 45,
+      defuseProgress: 0,
+      isExploded: false,
+      isDefused: false,
+    };
+
+    // Assign bomb carrier to first rebel player
+    const rebels = Object.values(this.state.players).filter(p => p.team === 'REBELS');
+    for (const r of rebels) {
+      r.hasBomb = false;
+    }
+    if (rebels.length > 0) {
+      this.state.bomb.carrierId = rebels[0].id;
+      rebels[0].hasBomb = true;
+    }
 
     // Spawn and reset players
     for (const player of Object.values(this.state.players)) {

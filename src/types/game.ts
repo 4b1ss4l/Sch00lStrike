@@ -26,6 +26,20 @@ export interface WeaponDef {
 
 export type RoundPhase = 'WAITING' | 'WARMUP' | 'BUY_PHASE' | 'ROUND_ACTIVE' | 'ROUND_END' | 'MATCH_OVER';
 
+export interface BombState {
+  carrierId?: string;
+  isPlanted: boolean;
+  site?: 'A' | 'B';
+  position?: [number, number, number];
+  plantTimer: number; // 45s countdown after plant
+  plantedAt?: number;
+  planterId?: string;
+  defuseProgress: number; // 0 to 1
+  defuserId?: string;
+  isExploded: boolean;
+  isDefused: boolean;
+}
+
 export interface PlayerInput {
   seq: number;
   forward: number; // -1 to 1
@@ -33,6 +47,7 @@ export interface PlayerInput {
   jump: boolean;
   crouch: boolean;
   walk: boolean;
+  interact?: boolean; // E key: Plant/Defuse
   yaw: number;
   pitch: number;
   shooting: boolean;
@@ -63,6 +78,7 @@ export interface PlayerState {
   lastShootTime: number;
   isReloading: boolean;
   reloadFinishTime: number;
+  hasBomb?: boolean;
 }
 
 export interface MapObjectDef {
@@ -139,6 +155,7 @@ export interface ServerGameState {
   rebelsScore: number;
   players: Record<string, PlayerState>;
   mapName: string;
+  bomb: BombState;
   winnerTeam?: Team | 'DRAW';
   roundEndReason?: string;
 }
@@ -174,6 +191,19 @@ export interface ServerToClientMessages {
     victimHealthRemaining: number;
   };
   'kill_event': KillfeedEntry;
+  'bomb_beep': {
+    timerRemaining: number;
+  };
+  'bomb_planted': {
+    site: 'A' | 'B';
+    position: [number, number, number];
+  };
+  'bomb_defused': {
+    defuserId: string;
+  };
+  'bomb_exploded': {
+    position: [number, number, number];
+  };
   'map_updated': {
     mapData: SchoolMapData;
   };

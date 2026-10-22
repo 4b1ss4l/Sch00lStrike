@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { GameRenderer } from './client/renderer/GameRenderer';
 import { FPSController } from './client/controls/FPSController';
 import { MapEditor } from './client/editor/MapEditor';
@@ -8,7 +8,10 @@ import { BuyMenu } from './client/ui/BuyMenu';
 import { Scoreboard } from './client/ui/Scoreboard';
 import { EditorUI } from './client/ui/EditorUI';
 import { MainMenu } from './client/ui/MainMenu';
+import { SettingsModal, GameSettings } from './client/ui/SettingsModal';
+import { TouchControls } from './client/ui/TouchControls';
 import { DEFAULT_SCHOOL_DUST_MAP } from './shared/defaultMap';
+import { WEAPONS } from './shared/weapons';
 import {
   PlayerState,
   ServerGameState,
@@ -19,7 +22,7 @@ import {
   SpawnPointDef,
   ObjectiveZoneDef,
 } from './types/game';
-import { Volume2, VolumeX, Pause, Users, ArrowLeft } from 'lucide-react';
+import { Volume2, VolumeX, Pause, Users, ArrowLeft, Settings as SettingsIcon } from 'lucide-react';
 
 export default function App() {
   const [appMode, setAppMode] = useState<'menu' | 'playing' | 'editor'>('menu');
@@ -38,6 +41,37 @@ export default function App() {
   const [scoreboardOpen, setScoreboardOpen] = useState<boolean>(false);
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(false);
+  const [settingsModalOpen, setSettingsModalOpen] = useState<boolean>(false);
+
+  const [settings, setSettings] = useState<GameSettings>(() => {
+    try {
+      const saved = localStorage.getItem('sch00l_strike_settings');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return {
+      mouseSensitivity: 0.0022,
+      masterVolume: 0.5,
+      crosshairColor: '#34d399',
+      crosshairSize: 'medium',
+      touchControlsMode: 'auto',
+    };
+  });
+
+  const updateSettings = (newSettings: Partial<GameSettings>) => {
+    setSettings((prev) => {
+      const next = { ...prev, ...newSettings };
+      try {
+        localStorage.setItem('sch00l_strike_settings', JSON.stringify(next));
+      } catch {}
+      if (fpsControllerRef.current && next.mouseSensitivity) {
+        fpsControllerRef.current.mouseSensitivity = next.mouseSensitivity;
+      }
+      return next;
+    });
+  };
+
+  const isTouchDevice = typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
+  const showTouchControls = settings.touchControlsMode === 'always' || (settings.touchControlsMode === 'auto' && isTouchDevice);
 
   // Editor States
   const [editorInstance, setEditorInstance] = useState<MapEditor | null>(null);
@@ -165,6 +199,29 @@ export default function App() {
 
           case 'kill_event': {
             setKillfeed((prev) => [...prev.slice(-8), payload]);
+            break;
+          }
+
+          case 'bomb_beep': {
+            const t = payload.timerRemaining;
+            const pitch = t <= 4 ? 1.3 : t <= 10 ? 1.15 : 1.0;
+            soundManager.playBombBeep(pitch);
+            break;
+          }
+
+          case 'bomb_planted': {
+            soundManager.playBombPlanted();
+            break;
+          }
+
+          case 'bomb_defused': {
+            soundManager.playBombDefused();
+            break;
+          }
+
+          case 'bomb_exploded': {
+            soundManager.playBombExplosion();
+            renderer.emitBombExplosion(payload.position);
             break;
           }
 
@@ -301,6 +358,10 @@ export default function App() {
         lp.yaw = controller.yaw;
         lp.pitch = controller.pitch;
 
+        // Keep controller active weapon in sync for firing cadence
+        const curWeapon = WEAPONS[lp.activeWeaponId] || WEAPONS['highlighter_pistol'];
+        controller.setActiveWeapon(curWeapon);
+
         if (input.forward !== 0 || input.right !== 0) {
           const moveSpeed = 7.0 * (input.crouch ? 0.45 : input.walk ? 0.52 : 1.0);
           const cosY = Math.cos(controller.yaw);
@@ -315,18 +376,23 @@ export default function App() {
           lp.velocity[0] = 0;
           lp.velocity[2] = 0;
         }
+      } else if (lp && !lp.isAlive && isZoomed) {
+        controller.resetZoom();
+        setIsZoomed(false);
+        renderer.camera.fov = 75;
+        renderer.camera.updateProjectionMatrix();
       }
 
       // Send input to server
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && !isPaused && !buyMenuOpen) {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && !isPaused && !buyMenuOpen && !settingsModalOpen) {
         wsRef.current.send(JSON.stringify({
           type: 'player_input',
           payload: input,
         }));
       }
 
-      // Render 3D Scene
-      renderer.render(dt, localPlayerStateRef.current, allPlayersRef.current);
+      // Render 3D Scene (including 3D planted bomb)
+      renderer.render(dt, localPlayerStateRef.current, allPlayersRef.current, serverState?.bomb);
 
       animFrameIdRef.current = requestAnimationFrame(tick);
     };
@@ -458,6 +524,45 @@ export default function App() {
 
   const localPlayer = serverState?.players[localPlayerId];
 
+  const { canPlantOrDefuse, plantOrDefusePrompt } = useMemo(() => {
+    const lp = localPlayerStateRef.current;
+    if (!lp || !lp.isAlive || !serverState) return { canPlantOrDefuse: false, plantOrDefusePrompt: '' };
+
+    const bomb = serverState.bomb;
+    // Rebel in Bombsite A or B
+    if (lp.team === 'REBELS' && !bomb.isPlanted) {
+      for (const obj of currentMapDataRef.current.objectives) {
+        if (obj.type === 'BOMBSITE_A' || obj.type === 'BOMBSITE_B') {
+          const dx = Math.abs(lp.position[0] - obj.position[0]);
+          const dz = Math.abs(lp.position[2] - obj.position[2]);
+          const halfX = obj.scale[0] / 2 + 1.2;
+          const halfZ = obj.scale[2] / 2 + 1.2;
+          if (dx <= halfX && dz <= halfZ) {
+            const site = obj.type === 'BOMBSITE_A' ? 'A' : 'B';
+            return {
+              canPlantOrDefuse: true,
+              plantOrDefusePrompt: `Pressione e segure [E] para armar no Ponto ${site}`,
+            };
+          }
+        }
+      }
+    }
+
+    // Inspector defusing planted bomb
+    if (lp.team === 'INSPECTORS' && bomb.isPlanted && bomb.position && !bomb.isDefused && !bomb.isExploded) {
+      const dx = lp.position[0] - bomb.position[0];
+      const dz = lp.position[2] - bomb.position[2];
+      if (Math.sqrt(dx * dx + dz * dz) <= 2.8) {
+        return {
+          canPlantOrDefuse: true,
+          plantOrDefusePrompt: 'Pressione e segure [E] para desarmar a Mochila!',
+        };
+      }
+    }
+
+    return { canPlantOrDefuse: false, plantOrDefusePrompt: '' };
+  }, [serverState]);
+
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-slate-950 font-mono select-none">
       {/* 1. MAIN MENU */}
@@ -466,7 +571,7 @@ export default function App() {
           onJoinGame={handleJoinGame}
           onSoloPractice={handleSoloPractice}
           onOpenEditor={() => setAppMode('editor')}
-          onOpenSettings={() => {}}
+          onOpenSettings={() => setSettingsModalOpen(true)}
           initialPlayerName={playerName}
         />
       )}
@@ -490,7 +595,55 @@ export default function App() {
             isZoomed={isZoomed}
             flashOpacity={flashOpacity}
             serverMessage={serverMessage}
+            crosshairColor={settings.crosshairColor}
+            crosshairSize={settings.crosshairSize}
+            onOpenSettings={() => {
+              setSettingsModalOpen(true);
+              fpsControllerRef.current?.releaseLock();
+            }}
+            canPlantOrDefuse={canPlantOrDefuse}
+            plantOrDefusePrompt={plantOrDefusePrompt}
           />
+
+          {/* Mobile Touch Controls Overlay */}
+          {showTouchControls && !isPaused && !buyMenuOpen && !settingsModalOpen && (
+            <TouchControls
+              onMove={(f, r) => fpsControllerRef.current?.setTouchMovement(f, r)}
+              onLook={(dx, dy) => fpsControllerRef.current?.addTouchLook(dx, dy)}
+              onShoot={(s) => fpsControllerRef.current?.setTouchShooting(s)}
+              onJump={(j) => fpsControllerRef.current?.setTouchJump(j)}
+              onCrouch={(c) => fpsControllerRef.current?.setTouchCrouch(c)}
+              onInteract={(i) => fpsControllerRef.current?.setTouchInteract(i)}
+              onReload={() => {
+                const lp = localPlayerStateRef.current;
+                if (!lp) return;
+                soundManager.playReload();
+                gameRendererRef.current?.viewmodelRenderer.triggerReload(2.2);
+                wsRef.current?.send(JSON.stringify({
+                  type: 'reload',
+                  payload: { weaponId: lp.activeWeaponId },
+                }));
+              }}
+              onBuyMenu={() => {
+                setBuyMenuOpen(true);
+                fpsControllerRef.current?.releaseLock();
+              }}
+              onZoomToggle={() => {
+                const lp = localPlayerStateRef.current;
+                if (lp && lp.activeWeaponId === 'telescopic_awp') {
+                  const nextZoom = !isZoomed;
+                  setIsZoomed(nextZoom);
+                  if (gameRendererRef.current) {
+                    gameRendererRef.current.camera.fov = nextZoom ? 25 : 75;
+                    gameRendererRef.current.camera.updateProjectionMatrix();
+                  }
+                }
+              }}
+              isZoomed={isZoomed}
+              canInteract={canPlantOrDefuse}
+              interactLabel={plantOrDefusePrompt ? 'Armar/Desarmar [E]' : 'Interagir [E]'}
+            />
+          )}
 
           {/* Buy Menu */}
           {buyMenuOpen && (
@@ -514,6 +667,17 @@ export default function App() {
 
           {/* Top Right Quick Utilities Bar */}
           <div className="fixed top-3 right-3 z-30 flex items-center gap-2">
+            <button
+              onClick={() => {
+                setSettingsModalOpen(true);
+                fpsControllerRef.current?.releaseLock();
+              }}
+              title="Configurações"
+              className="rounded-lg border border-slate-800 bg-slate-900/90 p-2 text-slate-300 hover:bg-slate-800 hover:text-white"
+            >
+              <SettingsIcon className="h-4 w-4" />
+            </button>
+
             <button
               onClick={() => {
                 const muted = soundManager.toggleMute();
@@ -578,6 +742,16 @@ export default function App() {
 
                   <button
                     onClick={() => {
+                      setSettingsModalOpen(true);
+                    }}
+                    className="w-full rounded-xl border border-slate-700 bg-slate-800 py-2.5 text-xs font-bold text-amber-300 hover:bg-slate-700 flex items-center justify-center gap-2"
+                  >
+                    <SettingsIcon className="h-4 w-4 text-amber-400" />
+                    CONFIGURAÇÕES
+                  </button>
+
+                  <button
+                    onClick={() => {
                       setAppMode('editor');
                       setIsPaused(false);
                     }}
@@ -620,6 +794,14 @@ export default function App() {
           )}
         </>
       )}
+
+      {/* TACTICAL SETTINGS MODAL */}
+      <SettingsModal
+        isOpen={settingsModalOpen}
+        onClose={() => setSettingsModalOpen(false)}
+        settings={settings}
+        onUpdateSettings={updateSettings}
+      />
     </div>
   );
 }

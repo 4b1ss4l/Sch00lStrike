@@ -141,3 +141,95 @@ test('WASD input updates player position and is not blocked by floors', () => {
   assert.ok(p1.position[0] > startX, 'Strafing right with yaw 0 should move positive X');
 });
 
+test('Solid wall blocks bullet from damaging enemy behind it', () => {
+  const room = new GameRoom();
+  const p1 = room.addPlayer('shooter', 'Shooter', 'INSPECTORS');
+  const p2 = room.addPlayer('victim', 'Victim', 'REBELS');
+
+  p1.position = [0, 0.5, 0];
+  p2.position = [0, 0.5, 10];
+  room.state.phase = 'ROUND_ACTIVE';
+
+  // Add a solid wall in between at Z = 5
+  room.mapData.objects.push({
+    id: 'blocking_wall',
+    type: 'wall',
+    position: [0, 1.5, 5],
+    rotation: [0, 0, 0],
+    scale: [4, 3, 0.5],
+    collision: true,
+  });
+
+  const hitResult = room.handleShoot('shooter', {
+    origin: [0, 1.62, 0],
+    direction: [0, 0, 1], // directed right at p2 behind wall
+    weaponId: 'highlighter_pistol',
+  });
+
+  assert.equal(hitResult.hit, false, 'Bullet should be blocked by the solid wall');
+  assert.equal(p2.health, 100, 'Target behind solid wall must take 0 damage');
+});
+
+test('Bomb planting and defusal properly transitions round states', () => {
+  const room = new GameRoom();
+  const p1 = room.addPlayer('rebel1', 'Rebel', 'REBELS');
+  const p2 = room.addPlayer('ct1', 'Inspector', 'INSPECTORS');
+  room.state.phase = 'ROUND_ACTIVE';
+
+  // Ensure an objective exists at [10, 0, 10]
+  room.mapData.objectives.push({
+    id: 'site_a',
+    name: 'Bombsite A',
+    type: 'BOMBSITE_A',
+    position: [10, 0, 10],
+    scale: [6, 2, 6],
+  });
+
+  p1.position = [10, 0.5, 10];
+
+  // Rebel holds interact [E] for 3.1 seconds in bombsite (35 ticks * 0.1s = 3.5s)
+  for (let i = 0; i < 35; i++) {
+    room.handleInput(p1.id, {
+      seq: i,
+      forward: 0,
+      right: 0,
+      jump: false,
+      crouch: false,
+      walk: false,
+      interact: true,
+      yaw: 0,
+      pitch: 0,
+      shooting: false,
+      activeWeaponId: 'highlighter_pistol',
+    });
+    room.tick(0.1);
+  }
+
+  assert.equal(room.state.bomb.isPlanted, true, 'Bomb should be successfully planted');
+  assert.equal(room.state.bomb.site, 'A');
+
+  // Inspector walks up to bomb position and holds [E] for 5.2 seconds to defuse (60 ticks * 0.1s = 6.0s)
+  p2.position = [10, 0.5, 10.5];
+  for (let i = 0; i < 60; i++) {
+    room.handleInput(p2.id, {
+      seq: 100 + i,
+      forward: 0,
+      right: 0,
+      jump: false,
+      crouch: false,
+      walk: false,
+      interact: true,
+      yaw: 0,
+      pitch: 0,
+      shooting: false,
+      activeWeaponId: 'highlighter_pistol',
+    });
+    room.tick(0.1);
+  }
+
+  assert.equal(room.state.bomb.isDefused, true, 'Bomb should be successfully defused');
+  assert.equal(room.state.phase, 'ROUND_END', 'Defusing should end the round in CT victory');
+  assert.equal(room.state.inspectorsScore, 1, 'Inspectors should score a point');
+});
+
+

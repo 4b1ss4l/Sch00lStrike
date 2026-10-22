@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { SchoolMapData, PlayerState, ShootEvent } from '../../types/game';
+import { SchoolMapData, PlayerState, ShootEvent, BombState } from '../../types/game';
 import { getProceduralTexture } from './textures';
 import { ViewmodelRenderer } from './ViewmodelRenderer';
 import { WorldPlayers } from './WorldPlayers';
@@ -75,6 +75,12 @@ export class GameRenderer {
     this.scene.add(this.mapGroup);
     this.scene.add(this.objectiveGroup);
 
+    // 3D Planted Bomb Group ("Mochila Bombástica")
+    this.bombGroup = new THREE.Group();
+    this.bombGroup.visible = false;
+    this.createBomb3DModel();
+    this.scene.add(this.bombGroup);
+
     // Sub-systems
     this.worldPlayers = new WorldPlayers();
     this.scene.add(this.worldPlayers.root);
@@ -88,6 +94,54 @@ export class GameRenderer {
     this.scene.add(this.camera);
 
     window.addEventListener('resize', this.onResize);
+  }
+
+  private bombGroup: THREE.Group;
+  private bombLedLight!: THREE.PointLight;
+
+  private createBomb3DModel() {
+    // 1. Backpack base body
+    const bagGeo = new THREE.BoxGeometry(0.55, 0.4, 0.35);
+    const bagMat = new THREE.MeshStandardMaterial({
+      color: 0x991b1b, // School red backpack
+      roughness: 0.75,
+    });
+    const bagMesh = new THREE.Mesh(bagGeo, bagMat);
+    bagMesh.position.y = 0.2;
+    this.bombGroup.add(bagMesh);
+
+    // Front pocket
+    const pocketGeo = new THREE.BoxGeometry(0.45, 0.25, 0.12);
+    const pocketMat = new THREE.MeshStandardMaterial({ color: 0x7f1d1d, roughness: 0.8 });
+    const pocketMesh = new THREE.Mesh(pocketGeo, pocketMat);
+    pocketMesh.position.set(0, 0.15, 0.2);
+    this.bombGroup.add(pocketMesh);
+
+    // Electronic timer box on top
+    const timerBoxGeo = new THREE.BoxGeometry(0.25, 0.1, 0.2);
+    const timerBoxMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, metalness: 0.7, roughness: 0.3 });
+    const timerBoxMesh = new THREE.Mesh(timerBoxGeo, timerBoxMat);
+    timerBoxMesh.position.set(0, 0.45, 0);
+    this.bombGroup.add(timerBoxMesh);
+
+    // Digital timer display screen
+    const screenGeo = new THREE.PlaneGeometry(0.18, 0.06);
+    const screenMat = new THREE.MeshBasicMaterial({ color: 0xef4444 });
+    const screenMesh = new THREE.Mesh(screenGeo, screenMat);
+    screenMesh.position.set(0, 0.46, 0.101);
+    this.bombGroup.add(screenMesh);
+
+    // Red LED beacon on top of timer
+    const ledGeo = new THREE.SphereGeometry(0.04, 8, 8);
+    const ledMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+    const ledMesh = new THREE.Mesh(ledGeo, ledMat);
+    ledMesh.position.set(0.09, 0.52, 0);
+    this.bombGroup.add(ledMesh);
+
+    // LED PointLight for dramatic pulsing glow
+    this.bombLedLight = new THREE.PointLight(0xff0000, 1.5, 4);
+    this.bombLedLight.position.set(0.09, 0.55, 0);
+    this.bombGroup.add(this.bombLedLight);
   }
 
   private onResize = () => {
@@ -207,13 +261,35 @@ export class GameRenderer {
     }
   }
 
-  public render(dt: number, localPlayer: PlayerState | undefined, allPlayers: Record<string, PlayerState>) {
+  public emitBombExplosion(pos: [number, number, number]) {
+    this.particleSystem.emitBombDetonation(pos);
+  }
+
+  public render(
+    dt: number,
+    localPlayer: PlayerState | undefined,
+    allPlayers: Record<string, PlayerState>,
+    bombState?: BombState
+  ) {
     // Animate objective zone letters floating
     const t = Date.now() * 0.003;
     for (const child of this.objectiveGroup.children) {
       if (child instanceof THREE.Sprite) {
         child.position.y = 3.5 + Math.sin(t) * 0.25;
       }
+    }
+
+    // Update 3D planted bomb state & pulsing LED
+    if (bombState && bombState.isPlanted && bombState.position) {
+      this.bombGroup.visible = true;
+      this.bombGroup.position.set(bombState.position[0], bombState.position[1], bombState.position[2]);
+      if (this.bombLedLight) {
+        // Fast blinking LED as time runs down
+        const blinkSpeed = bombState.plantTimer <= 10 ? 0.03 : 0.015;
+        this.bombLedLight.intensity = Math.sin(Date.now() * blinkSpeed) > 0 ? 2.5 : 0.2;
+      }
+    } else {
+      this.bombGroup.visible = false;
     }
 
     if (localPlayer) {
@@ -242,6 +318,21 @@ export class GameRenderer {
 
   public dispose() {
     window.removeEventListener('resize', this.onResize);
+
+    // Dispose scene materials and geometries thoroughly
+    this.scene.traverse((obj) => {
+      if (obj instanceof THREE.Mesh) {
+        if (obj.geometry) obj.geometry.dispose();
+        if (obj.material) {
+          if (Array.isArray(obj.material)) {
+            obj.material.forEach((m) => m.dispose());
+          } else {
+            obj.material.dispose();
+          }
+        }
+      }
+    });
+
     this.renderer.dispose();
     if (this.renderer.domElement.parentElement) {
       this.renderer.domElement.parentElement.removeChild(this.renderer.domElement);

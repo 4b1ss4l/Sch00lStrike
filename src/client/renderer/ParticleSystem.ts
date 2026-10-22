@@ -89,6 +89,32 @@ export class ParticleSystem {
     }
   }
 
+  public emitBombDetonation(origin: [number, number, number]) {
+    // 1. Confetti burst
+    this.emitConfettiExplosion(origin);
+    // 2. High velocity smoke clouds
+    this.emitChalkSmoke(origin);
+    // 3. Fiery / spark shards
+    const blastColors = [0xef4444, 0xf97316, 0xfacc15, 0xffffff];
+    for (let i = 0; i < 120; i++) {
+      const p = this.getFreeParticle();
+      if (!p) break;
+      p.pos.set(origin[0], origin[1] + 0.3, origin[2]);
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 4 + Math.random() * 12;
+      p.vel.set(
+        Math.cos(angle) * speed,
+        3 + Math.random() * 9,
+        Math.sin(angle) * speed
+      );
+      p.color.setHex(blastColors[Math.floor(Math.random() * blastColors.length)]);
+      p.size = 0.2 + Math.random() * 0.15;
+      p.life = 0;
+      p.maxLife = 1.8 + Math.random() * 1.0;
+      p.active = true;
+    }
+  }
+
   public emitChalkSmoke(origin: [number, number, number]) {
     for (let i = 0; i < 80; i++) {
       const p = this.getFreeParticle();

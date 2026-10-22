@@ -11,7 +11,19 @@ export class FPSController {
 
   private keys: Record<string, boolean> = {};
   private seq: number = 0;
-  private isShooting: boolean = false;
+  public isShooting: boolean = false;
+
+  // Active weapon stats for firing cadence
+  private activeWeaponFireRate: number = 6.0;
+  private isActiveWeaponAutomatic: boolean = false;
+  private timeSinceLastShot: number = 999;
+
+  // Touch control inputs
+  private touchMove = { forward: 0, right: 0 };
+  private touchShooting: boolean = false;
+  private touchJump: boolean = false;
+  private touchCrouch: boolean = false;
+  private touchInteract: boolean = false;
 
   // Crosshair recoil & spread expansion
   public spread: number = 0;
@@ -38,6 +50,22 @@ export class FPSController {
     window.addEventListener('blur', this.onBlur);
   }
 
+  public setActiveWeapon(weapon: { fireRate?: number; isAutomatic?: boolean }) {
+    if (weapon.fireRate) {
+      this.activeWeaponFireRate = weapon.fireRate;
+    }
+    this.isActiveWeaponAutomatic = Boolean(weapon.isAutomatic);
+  }
+
+  public resetZoom() {
+    if (this.isZoomed) {
+      this.isZoomed = false;
+      if (this.onZoomCallback) {
+        this.onZoomCallback(false);
+      }
+    }
+  }
+
   public setCallbacks(callbacks: {
     onShoot?: () => void;
     onReload?: () => void;
@@ -54,6 +82,39 @@ export class FPSController {
     this.onZoomCallback = callbacks.onZoom;
   }
 
+  public setTouchMovement(forward: number, right: number) {
+    this.touchMove.forward = forward;
+    this.touchMove.right = right;
+  }
+
+  public addTouchLook(deltaYaw: number, deltaPitch: number) {
+    const sens = this.isZoomed ? this.mouseSensitivity * 0.4 : this.mouseSensitivity;
+    this.yaw -= deltaYaw * sens * 3.5;
+    this.pitch -= deltaPitch * sens * 3.5;
+    const maxPitch = (Math.PI / 2) - 0.05;
+    this.pitch = Math.max(-maxPitch, Math.min(maxPitch, this.pitch));
+  }
+
+  public setTouchShooting(shooting: boolean) {
+    this.touchShooting = shooting;
+    if (shooting && !this.isShooting) {
+      this.triggerShot();
+    }
+    this.isShooting = shooting;
+  }
+
+  public setTouchJump(jump: boolean) {
+    this.touchJump = jump;
+  }
+
+  public setTouchCrouch(crouch: boolean) {
+    this.touchCrouch = crouch;
+  }
+
+  public setTouchInteract(interact: boolean) {
+    this.touchInteract = interact;
+  }
+
   public requestLock() {
     this.element.requestPointerLock();
   }
@@ -67,6 +128,7 @@ export class FPSController {
   private onBlur = () => {
     this.keys = {};
     this.isShooting = false;
+    this.touchShooting = false;
   };
 
   private onPointerLockChange = () => {
@@ -85,6 +147,14 @@ export class FPSController {
     this.pitch = Math.max(-maxPitch, Math.min(maxPitch, this.pitch));
   };
 
+  private triggerShot() {
+    if (this.onShootCallback) {
+      this.onShootCallback();
+    }
+    this.timeSinceLastShot = 0;
+    this.addRecoil(0.035);
+  }
+
   private onMouseDown = (e: MouseEvent) => {
     if (!this.isLocked) {
       this.requestLock();
@@ -94,10 +164,7 @@ export class FPSController {
     if (e.button === 0) {
       // Left click: Fire
       this.isShooting = true;
-      if (this.onShootCallback) {
-        this.onShootCallback();
-      }
-      this.addRecoil(0.04);
+      this.triggerShot();
     } else if (e.button === 2) {
       // Right click: Scope zoom toggle
       this.isZoomed = !this.isZoomed;
@@ -165,16 +232,26 @@ export class FPSController {
   };
 
   public addRecoil(amount: number) {
-    this.pitch += amount * 0.5;
+    this.pitch += amount * 0.4;
     this.spread = Math.min(0.12, this.spread + amount);
   }
 
   public update(dt: number): PlayerInput {
     // Crosshair spread recovery
     this.spread = Math.max(0.012, this.spread - dt * 0.25);
+    this.timeSinceLastShot += dt;
 
-    let forward = 0;
-    let right = 0;
+    // Automatic weapon cadence loop while mouse / touch button is held
+    const shootingActive = this.isShooting || this.touchShooting;
+    if (shootingActive && this.isActiveWeaponAutomatic) {
+      const minInterval = 1 / Math.max(0.1, this.activeWeaponFireRate);
+      if (this.timeSinceLastShot >= minInterval) {
+        this.triggerShot();
+      }
+    }
+
+    let forward = this.touchMove.forward;
+    let right = this.touchMove.right;
 
     const isPressed = (aliases: string[]) => aliases.some((a) => Boolean(this.keys[a]));
 
@@ -187,9 +264,10 @@ export class FPSController {
     // Left: A, ArrowLeft, Q (AZERTY)
     if (isPressed(['KeyA', 'a', 'A', 'ArrowLeft', 'KeyQ', 'q', 'Q'])) right -= 1;
 
-    const jump = isPressed(['Space', ' ']);
-    const crouch = isPressed(['ControlLeft', 'ControlRight', 'KeyC', 'c', 'C']);
+    const jump = isPressed(['Space', ' ']) || this.touchJump;
+    const crouch = isPressed(['ControlLeft', 'ControlRight', 'KeyC', 'c', 'C']) || this.touchCrouch;
     const walk = isPressed(['ShiftLeft', 'ShiftRight']);
+    const interact = isPressed(['KeyE', 'e', 'E']) || this.touchInteract;
 
     // Footstep audio trigger when moving on ground
     if ((forward !== 0 || right !== 0) && !crouch) {
@@ -199,14 +277,15 @@ export class FPSController {
     this.seq += 1;
     return {
       seq: this.seq,
-      forward,
-      right,
+      forward: Math.max(-1, Math.min(1, forward)),
+      right: Math.max(-1, Math.min(1, right)),
       jump,
       crouch,
       walk,
+      interact,
       yaw: this.yaw,
       pitch: this.pitch,
-      shooting: this.isShooting,
+      shooting: shootingActive,
       activeWeaponId: '',
     };
   }

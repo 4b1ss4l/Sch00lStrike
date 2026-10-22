@@ -27,16 +27,24 @@ export class SoundManager {
     }
   }
 
+  private unmutedVolume: number = 0.5;
+
   public setVolume(vol: number) {
-    if (this.masterGain) {
-      this.masterGain.gain.value = Math.max(0, Math.min(1, vol));
+    const clamped = Math.max(0, Math.min(1, vol));
+    this.unmutedVolume = clamped;
+    if (this.masterGain && !this.isMuted) {
+      this.masterGain.gain.value = clamped;
     }
+  }
+
+  public getVolume(): number {
+    return this.unmutedVolume;
   }
 
   public toggleMute(): boolean {
     this.isMuted = !this.isMuted;
     if (this.masterGain && this.ctx) {
-      this.masterGain.gain.value = this.isMuted ? 0 : 0.5;
+      this.masterGain.gain.value = this.isMuted ? 0 : this.unmutedVolume;
     }
     return this.isMuted;
   }
@@ -338,6 +346,103 @@ export class SoundManager {
     gain.connect(this.masterGain);
     osc.start(now);
     osc.stop(now + 3.3);
+  }
+
+  public playBombBeep(pitchModifier: number = 1.0) {
+    if (this.isMuted || !this.initContext() || !this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(2600 * pitchModifier, now);
+
+    gain.gain.setValueAtTime(0.35, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.09);
+  }
+
+  public playBombPlanted() {
+    if (this.isMuted || !this.initContext() || !this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+
+    // Double high electronic chirp
+    [0, 0.12].forEach((offset) => {
+      const osc = this.ctx!.createOscillator();
+      const gain = this.ctx!.createGain();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(1800, now + offset);
+      osc.frequency.exponentialRampToValueAtTime(3200, now + offset + 0.08);
+
+      gain.gain.setValueAtTime(0.25, now + offset);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + offset + 0.09);
+
+      osc.connect(gain);
+      gain.connect(this.masterGain!);
+      osc.start(now + offset);
+      osc.stop(now + offset + 0.1);
+    });
+  }
+
+  public playBombDefused() {
+    if (this.isMuted || !this.initContext() || !this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+
+    // Harmonious chord resolving up
+    [523.25, 659.25, 783.99, 1046.5].forEach((freq, idx) => {
+      const osc = this.ctx!.createOscillator();
+      const gain = this.ctx!.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, now + idx * 0.07);
+
+      gain.gain.setValueAtTime(0.25, now + idx * 0.07);
+      gain.gain.exponentialRampToValueAtTime(0.005, now + idx * 0.07 + 0.6);
+
+      osc.connect(gain);
+      gain.connect(this.masterGain!);
+      osc.start(now + idx * 0.07);
+      osc.stop(now + idx * 0.07 + 0.7);
+    });
+  }
+
+  public playBombExplosion() {
+    if (this.isMuted || !this.initContext() || !this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+
+    // Deep sub-bass boom
+    const subOsc = this.ctx.createOscillator();
+    const subGain = this.ctx.createGain();
+    subOsc.type = 'sine';
+    subOsc.frequency.setValueAtTime(150, now);
+    subOsc.frequency.exponentialRampToValueAtTime(25, now + 1.2);
+    subGain.gain.setValueAtTime(0.9, now);
+    subGain.gain.exponentialRampToValueAtTime(0.001, now + 1.4);
+    subOsc.connect(subGain);
+    subGain.connect(this.masterGain);
+    subOsc.start(now);
+    subOsc.stop(now + 1.5);
+
+    // Filtered noise blast
+    const noise = this.createNoiseBuffer(1.5);
+    const noiseNode = this.ctx.createBufferSource();
+    noiseNode.buffer = noise;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(1200, now);
+    filter.frequency.exponentialRampToValueAtTime(80, now + 1.4);
+
+    const noiseGain = this.ctx.createGain();
+    noiseGain.gain.setValueAtTime(0.85, now);
+    noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 1.5);
+
+    noiseNode.connect(filter);
+    filter.connect(noiseGain);
+    noiseGain.connect(this.masterGain);
+    noiseNode.start(now);
   }
 
   private createNoiseBuffer(duration: number): AudioBuffer {

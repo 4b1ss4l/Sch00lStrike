@@ -69,6 +69,18 @@ gameRoom.setCallbacks({
   onMessage: (text, type) => {
     broadcast('server_message', { text, type });
   },
+  onBombBeep: (timerRemaining) => {
+    broadcast('bomb_beep', { timerRemaining });
+  },
+  onBombPlanted: (site, position) => {
+    broadcast('bomb_planted', { site, position });
+  },
+  onBombDefused: (defuserId) => {
+    broadcast('bomb_defused', { defuserId });
+  },
+  onBombExploded: (position) => {
+    broadcast('bomb_exploded', { position });
+  },
 });
 
 // Network interfaces discovery for LAN IP display
