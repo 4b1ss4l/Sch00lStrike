@@ -38,25 +38,23 @@ Projetar e construir um jogo de tiro em primeira pessoa (FPS) competitivo multip
 
 ---
 
-## 4. Arquivos Principais
-- `server/src/index.js`: Ponto de entrada nativo Node.js (`node server/src/index.js`) que resolveu o erro `MODULE_NOT_FOUND`, compatível com execução direta e modular.
-- `server/src/game/GameRoom.js`: Motor autoritativo da partida em JavaScript ES modular.
-- `shared/defaultMap.js`: Carregador do mapa padrão com leitura de `maps/school_dust/map.json`.
-- `maps/school_dust/map.json`: Arquivo padrão oficial do mapa SCHOOL_DUST em JSON.
-- `server.ts`: Servidor Express + WebSocket integrado ao Vite Dev Server.
-- `src/server/GameRoom.ts`: Máquina de estados autoritativa dos rounds, cálculo de dano, hitboxes, economia e IA de bots.
-- `src/types/game.ts`: Tipos do protocolo, armas, mapas, jogadores e estados do servidor.
+## 4. Arquitetura Unificada Oficial
+- `server.ts`: Servidor Express + WebSocket oficial, integrando Vite e API REST com autenticação e proteção contra rate-limiting.
+- `src/server/GameRoom.ts`: Motor autoritativo oficial em TypeScript com máquina de estados de rounds, simulação de movimento com normalização diagonal, verificação de tiro com raycast contra oclusão de paredes sólidas, mecânicas individuais de plantio/desarme da Mochila Bombástica, IA de bots com LOS e economia estilo CS 1.6.
+- `src/types/game.ts`: Tipos do protocolo, armas, mapas, jogadores, estados do servidor e bomb state.
 - `src/shared/weapons.ts`: Tabela centralizada de equipamentos e armas escolares.
-- `src/shared/defaultMap.ts`: Geometria e dados do mapa oficial SCHOOL_DUST.
-- `src/shared/mapValidator.ts`: Motor de validação e serialização/parsing de mapas.
-- `src/client/renderer/GameRenderer.ts`: Motor Three.js, cena, iluminação e renderizador da partida.
+- `src/shared/defaultMap.ts`: Geometria e dados oficiais do mapa SCHOOL_DUST.
+- `src/shared/mapValidator.ts`: Motor de validação com verificação de finite numbers, limites e modos competitivos.
+- `src/client/renderer/GameRenderer.ts`: Motor Three.js, cena, iluminação, modelo 3D da bomba com display digital e luz pulsante, e renderizador da partida.
 - `src/client/renderer/ViewmodelRenderer.ts`: Modelos e animações de armas escolares em 1ª pessoa.
 - `src/client/renderer/WorldPlayers.ts`: Modelagem 3D dos jogadores rivais e aliados.
-- `src/client/renderer/ParticleSystem.ts`: Efeitos de tiros, fumaça, faíscas e confete.
-- `src/client/audio/SoundManager.ts`: Sintetizador Web Audio API para efeitos sonoros e sinal escolar.
-- `src/client/controls/FPSController.ts`: Leitura de mouse, sensibilidade, teclado e cálculo de recoil.
+- `src/client/renderer/ParticleSystem.ts`: Efeitos de tiros, fumaça, faíscas, confete e explosão de mochila.
+- `src/client/audio/SoundManager.ts`: Sintetizador Web Audio API para efeitos sonoros, sinal escolar, bips acelerados e persistência de volume.
+- `src/client/controls/FPSController.ts`: Leitura de mouse, sensibilidade, teclado, cadência contínua de armas automáticas e suporte a controles touch.
+- `src/client/ui/SettingsModal.tsx`: Painel de configurações táticas com sensibilidade, volume, retículos e controles touch.
+- `src/client/ui/TouchControls.tsx`: Controles virtuais (joystick analógico + botões de ação) para dispositivos touch.
 - `src/client/editor/MapEditor.ts`: Mecânica 3D do editor de mapas (órbita, snap, seleção, duplicação).
-- `src/client/ui/HUD.tsx`: Interface de combate CS 1.6 temática escolar.
+- `src/client/ui/HUD.tsx`: Interface de combate CS 1.6 temática escolar com banners de bomba e barra de desarme.
 - `src/client/ui/BuyMenu.tsx`: Menu de compra entre rounds.
 - `src/client/ui/Scoreboard.tsx`: Placar geral da partida no Tab.
 - `src/client/ui/EditorUI.tsx`: Painel de ferramentas, paleta e inspetor do editor de mapas.

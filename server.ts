@@ -30,6 +30,9 @@ interface ClientConnection {
   id: string;
   ws: WebSocket;
   lastPingTime: number;
+  hasJoined: boolean;
+  msgCount: number;
+  lastSec: number;
 }
 
 const clients: Map<string, ClientConnection> = new Map();
@@ -115,17 +118,27 @@ app.get('/api/map', (_req, res) => {
 
 app.post('/api/map', (req, res) => {
   const mapData = req.body as SchoolMapData;
+  if (!mapData || typeof mapData !== 'object') {
+    return res.status(400).json({ success: false, error: 'Dados do mapa ausentes ou malformados.' });
+  }
+
+  const validation = validateSchoolMap(mapData);
+  if (!validation.valid) {
+    return res.status(400).json({ success: false, error: `Mapa inválido: ${validation.errors.join('; ')}` });
+  }
+
   const result = gameRoom.loadMap(mapData);
   if (!result.success) {
     return res.status(400).json({ success: false, error: result.message });
   }
   broadcast('map_updated', { mapData: gameRoom.mapData });
-  broadcast('server_message', { text: `Novo mapa carregado pelo Administrador: ${mapData.name}`, type: 'info' });
+  broadcast('server_message', { text: `Novo mapa carregado: ${mapData.name}`, type: 'info' });
   return res.json({ success: true, message: result.message });
 });
 
 app.post('/api/bot/add', (req, res) => {
-  const team: Team = req.body.team || 'REBELS';
+  const reqTeam = req.body?.team;
+  const team: Team = reqTeam === 'INSPECTORS' || reqTeam === 'REBELS' ? reqTeam : 'REBELS';
   const bot = gameRoom.addBot(team);
   broadcast('server_message', { text: `${bot.name} entrou para a equipe ${team === 'INSPECTORS' ? 'Inspetores' : 'Rebeldes'}!`, type: 'info' });
   res.json({ success: true, bot });
@@ -144,18 +157,42 @@ wss.on('connection', (ws) => {
     id: playerId,
     ws,
     lastPingTime: Date.now(),
+    hasJoined: false,
+    msgCount: 0,
+    lastSec: Math.floor(Date.now() / 1000),
   };
   clients.set(playerId, conn);
 
   ws.on('message', (rawData) => {
     try {
+      // Per-connection rate limiting (max 80 msgs / sec)
+      const nowSec = Math.floor(Date.now() / 1000);
+      if (conn.lastSec === nowSec) {
+        conn.msgCount++;
+        if (conn.msgCount > 80) {
+          return;
+        }
+      } else {
+        conn.lastSec = nowSec;
+        conn.msgCount = 1;
+      }
+
       const msg = JSON.parse(rawData.toString());
+      if (!msg || typeof msg !== 'object') return;
       const { type, payload } = msg;
 
       switch (type) {
         case 'join': {
+          if (conn.hasJoined) {
+            sendTo(ws, 'server_message', { text: 'Conexão já associada a um jogador nesta partida.', type: 'warning' });
+            break;
+          }
           const { name, team } = payload as ClientToServerMessages['join'];
-          const player = gameRoom.addPlayer(playerId, name || 'Estudante', team);
+          const safeName = typeof name === 'string' && name.trim().length > 0 ? name.trim().slice(0, 20) : 'Estudante';
+          const safeTeam: Team = team === 'INSPECTORS' || team === 'REBELS' ? team : 'INSPECTORS';
+
+          conn.hasJoined = true;
+          const player = gameRoom.addPlayer(playerId, safeName, safeTeam);
           sendTo(ws, 'init_welcome', {
             playerId,
             serverState: gameRoom.state,
@@ -170,18 +207,25 @@ wss.on('connection', (ws) => {
 
         case 'change_team': {
           const { team } = payload as ClientToServerMessages['change_team'];
-          gameRoom.setPlayerTeam(playerId, team);
+          if (team === 'INSPECTORS' || team === 'REBELS') {
+            gameRoom.setPlayerTeam(playerId, team);
+          }
           break;
         }
 
         case 'player_input': {
           const input = payload as ClientToServerMessages['player_input'];
-          gameRoom.handleInput(playerId, input);
+          if (input && typeof input === 'object') {
+            gameRoom.handleInput(playerId, input);
+          }
           break;
         }
 
         case 'shoot': {
           const shootData = payload as ClientToServerMessages['shoot'];
+          if (!shootData || !Array.isArray(shootData.direction) || shootData.direction.some(v => typeof v !== 'number' || !Number.isFinite(v))) {
+            break;
+          }
           const result = gameRoom.handleShoot(playerId, shootData);
           if (result.hit && result.victimId) {
             const victim = gameRoom.state.players[result.victimId];
@@ -197,29 +241,36 @@ wss.on('connection', (ws) => {
 
         case 'reload': {
           const { weaponId } = payload as ClientToServerMessages['reload'];
-          gameRoom.handleReload(playerId, weaponId);
+          if (typeof weaponId === 'string') {
+            gameRoom.handleReload(playerId, weaponId);
+          }
           break;
         }
 
         case 'switch_weapon': {
           const { weaponId } = payload as ClientToServerMessages['switch_weapon'];
-          gameRoom.handleSwitchWeapon(playerId, weaponId);
+          if (typeof weaponId === 'string') {
+            gameRoom.handleSwitchWeapon(playerId, weaponId);
+          }
           break;
         }
 
         case 'buy_item': {
           const { weaponId } = payload as ClientToServerMessages['buy_item'];
-          const buyResult = gameRoom.handleBuyItem(playerId, weaponId);
-          sendTo(ws, 'server_message', {
-            text: buyResult.message,
-            type: buyResult.success ? 'info' : 'warning',
-          });
+          if (typeof weaponId === 'string') {
+            const buyResult = gameRoom.handleBuyItem(playerId, weaponId);
+            sendTo(ws, 'server_message', {
+              text: buyResult.message,
+              type: buyResult.success ? 'info' : 'warning',
+            });
+          }
           break;
         }
 
         case 'add_bot': {
           const { team } = payload as ClientToServerMessages['add_bot'];
-          gameRoom.addBot(team);
+          const botTeam: Team = team === 'INSPECTORS' || team === 'REBELS' ? team : 'REBELS';
+          gameRoom.addBot(botTeam);
           break;
         }
 
@@ -230,6 +281,7 @@ wss.on('connection', (ws) => {
 
         case 'admin_load_map': {
           const { mapData } = payload as ClientToServerMessages['admin_load_map'];
+          if (!mapData || typeof mapData !== 'object') break;
           const res = gameRoom.loadMap(mapData);
           if (res.success) {
             broadcast('map_updated', { mapData: gameRoom.mapData });

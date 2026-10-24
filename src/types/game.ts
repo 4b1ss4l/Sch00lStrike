@@ -77,6 +77,7 @@ export interface PlayerState {
   ping: number;
   lastShootTime: number;
   isReloading: boolean;
+  reloadingWeaponId?: string;
   reloadFinishTime: number;
   hasBomb?: boolean;
 }
@@ -105,6 +106,7 @@ export interface ObjectiveZoneDef {
   name: string;
   type: 'BOMBSITE_A' | 'BOMBSITE_B' | 'BUY_ZONE_INSPECTORS' | 'BUY_ZONE_REBELS';
   position: [number, number, number];
+  rotation?: [number, number, number];
   scale: [number, number, number];
 }
 

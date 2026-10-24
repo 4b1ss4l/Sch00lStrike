@@ -66,6 +66,9 @@ export class GameRoom {
   private lastBombBeepTime: number = 0;
   private plantHoldProgress: number = 0;
   private defuseHoldProgress: number = 0;
+  private activePlanterId: string | null = null;
+  private activeDefuserId: string | null = null;
+  private playerLastInputTimes: Map<string, number> = new Map();
   private lastPlayerInputs: Map<string, PlayerInput> = new Map();
 
   constructor(initialMap: SchoolMapData = DEFAULT_SCHOOL_DUST_MAP) {
@@ -222,13 +225,36 @@ export class GameRoom {
     const player = this.state.players[id];
     if (!player || !player.isAlive) return;
 
-    player.yaw = input.yaw;
-    player.pitch = input.pitch;
-    this.lastPlayerInputs.set(id, input);
+    const now = Date.now();
+    const lastInputTime = this.playerLastInputTimes.get(id);
+    this.playerLastInputTimes.set(id, now);
 
-    // Apply movement simulation
-    const dt = 1 / GAME_CONSTANTS.SERVER_TICK_RATE;
-    this.simulatePlayerMovement(player, input, dt);
+    // Sanitize input values
+    const safeForward = typeof input.forward === 'number' && Number.isFinite(input.forward)
+      ? Math.max(-1, Math.min(1, input.forward))
+      : 0;
+    const safeRight = typeof input.right === 'number' && Number.isFinite(input.right)
+      ? Math.max(-1, Math.min(1, input.right))
+      : 0;
+    const safeYaw = typeof input.yaw === 'number' && Number.isFinite(input.yaw) ? input.yaw : player.yaw;
+    const safePitch = typeof input.pitch === 'number' && Number.isFinite(input.pitch) ? input.pitch : player.pitch;
+
+    const sanitizedInput: PlayerInput = {
+      ...input,
+      forward: safeForward,
+      right: safeRight,
+      yaw: safeYaw,
+      pitch: safePitch,
+    };
+
+    player.yaw = safeYaw;
+    player.pitch = safePitch;
+    this.lastPlayerInputs.set(id, sanitizedInput);
+
+    // If rapid inputs are sent, simulate only the elapsed real time to prevent packet flooding speedups
+    const rawDt = lastInputTime ? (now - lastInputTime) / 1000 : (1 / GAME_CONSTANTS.SERVER_TICK_RATE);
+    const dt = Math.max(0.005, Math.min(0.05, rawDt));
+    this.simulatePlayerMovement(player, sanitizedInput, dt);
   }
 
   public simulatePlayerMovement(player: PlayerState, input: PlayerInput, dt: number): void {
@@ -241,9 +267,17 @@ export class GameRoom {
     const cosY = Math.cos(player.yaw);
     const sinY = Math.sin(player.yaw);
 
-    // Forward/back and strafe
-    const dx = (input.forward * -sinY + input.right * cosY) * speed * dt;
-    const dz = (input.forward * -cosY + input.right * -sinY) * speed * dt;
+    // Forward/back and strafe with diagonal vector normalization
+    let moveX = input.forward * -sinY + input.right * cosY;
+    let moveZ = input.forward * -cosY + input.right * -sinY;
+    const moveLen = Math.sqrt(moveX * moveX + moveZ * moveZ);
+    if (moveLen > 1.0) {
+      moveX /= moveLen;
+      moveZ /= moveLen;
+    }
+
+    const dx = moveX * speed * dt;
+    const dz = moveZ * speed * dt;
 
     const newX = player.position[0] + dx;
     const newZ = player.position[2] + dz;
@@ -307,6 +341,7 @@ export class GameRoom {
       return { hit: false, damage: 0, isHeadshot: false };
     }
 
+    // Authoritative weapon check: prioritized equipped weapon or weapon key
     const activeWeaponKey = (shootData.weaponId && WEAPONS[shootData.weaponId])
       ? shootData.weaponId
       : player.activeWeaponId && WEAPONS[player.activeWeaponId]
@@ -314,6 +349,13 @@ export class GameRoom {
       : 'highlighter_pistol';
     const weapon = WEAPONS[activeWeaponKey];
     if (!weapon) return { hit: false, damage: 0, isHeadshot: false };
+
+    // Cancel reload if firing
+    if (player.isReloading) {
+      player.isReloading = false;
+      player.reloadingWeaponId = undefined;
+      player.reloadFinishTime = 0;
+    }
 
     // Fire rate check
     const now = Date.now();
@@ -331,10 +373,12 @@ export class GameRoom {
     }
     player.lastShootTime = now;
 
-    // Authoritative origin calculation (with slight tolerance for client prediction)
+    // Authoritative origin calculation strictly from server player position and eye height
     const serverEyeHeight = player.position[1] + GAME_CONSTANTS.PLAYER_EYE_HEIGHT;
     const ox = player.position[0];
-    const oy = Math.abs(shootData.origin[1] - serverEyeHeight) < 0.65 ? shootData.origin[1] : serverEyeHeight;
+    const oy = (shootData.origin && Math.abs(shootData.origin[1] - serverEyeHeight) < 0.75)
+      ? shootData.origin[1]
+      : serverEyeHeight;
     const oz = player.position[2];
 
     const [dx, dy, dz] = shootData.direction;
@@ -483,7 +527,7 @@ export class GameRoom {
     const player = this.state.players[playerId];
     if (!player || !player.isAlive || player.isReloading) return false;
 
-    const activeId = weaponId || player.activeWeaponId;
+    const activeId = weaponId && player.inventory.includes(weaponId) ? weaponId : player.activeWeaponId;
     const weapon = WEAPONS[activeId];
     if (!weapon || weapon.category === 'MELEE') return false;
 
@@ -491,6 +535,7 @@ export class GameRoom {
     if (needed <= 0 || player.reserveAmmo <= 0) return false;
 
     player.isReloading = true;
+    player.reloadingWeaponId = activeId;
     player.reloadFinishTime = Date.now() + weapon.reloadTime * 1000;
     return true;
   }
@@ -504,7 +549,10 @@ export class GameRoom {
     if (!weapon) return false;
 
     player.activeWeaponId = weaponId;
+    // Switching weapons cancels any active reload consistently
     player.isReloading = false;
+    player.reloadingWeaponId = undefined;
+    player.reloadFinishTime = 0;
     return true;
   }
 
@@ -534,6 +582,18 @@ export class GameRoom {
       return { success: false, message: 'Equipamento não encontrado.' };
     }
 
+    // If player already has this weapon, prevent double-charge if already fully stocked
+    if (player.inventory.includes(weapon.id)) {
+      if (player.ammoInClip >= weapon.magazineSize && player.reserveAmmo >= weapon.reserveAmmo) {
+        return { success: false, message: 'Você já possui este equipamento e sua munição está completa!' };
+      }
+      const ammoCost = Math.min(100, player.money);
+      player.money -= ammoCost;
+      player.ammoInClip = weapon.magazineSize;
+      player.reserveAmmo = weapon.reserveAmmo;
+      return { success: true, message: 'Munição recarregada com sucesso!' };
+    }
+
     if (player.money < weapon.price) {
       return { success: false, message: 'Dinheiro insuficiente para este item.' };
     }
@@ -561,6 +621,7 @@ export class GameRoom {
     player.ammoInClip = weapon.magazineSize;
     player.reserveAmmo = weapon.reserveAmmo;
     player.isReloading = false;
+    player.reloadingWeaponId = undefined;
 
     return { success: true, message: `${weapon.portugueseName} adquirido!` };
   }
@@ -573,14 +634,17 @@ export class GameRoom {
     // Process Reload completion
     for (const player of Object.values(this.state.players)) {
       if (player.isReloading && now >= player.reloadFinishTime) {
-        const weapon = WEAPONS[player.activeWeaponId];
-        if (weapon) {
-          const needed = weapon.magazineSize - player.ammoInClip;
-          const transfer = Math.min(needed, player.reserveAmmo);
-          player.ammoInClip += transfer;
-          player.reserveAmmo -= transfer;
+        if (!player.reloadingWeaponId || player.reloadingWeaponId === player.activeWeaponId) {
+          const weapon = WEAPONS[player.activeWeaponId];
+          if (weapon) {
+            const needed = weapon.magazineSize - player.ammoInClip;
+            const transfer = Math.min(needed, player.reserveAmmo);
+            player.ammoInClip += transfer;
+            player.reserveAmmo -= transfer;
+          }
         }
         player.isReloading = false;
+        player.reloadingWeaponId = undefined;
       }
 
       // Physics (Gravity & vertical velocity)
@@ -620,27 +684,49 @@ export class GameRoom {
 
     // If bomb is NOT yet planted: check if any Rebel is planting in Bombsite A or B
     if (!bomb.isPlanted && !bomb.isExploded && !bomb.isDefused) {
-      let isAnyRebelPlanting = false;
+      // Validate current active planter
+      let currentPlanter: PlayerState | null = null;
+      if (this.activePlanterId) {
+        const p = this.state.players[this.activePlanterId];
+        const input = this.lastPlayerInputs.get(this.activePlanterId);
+        if (p && p.isAlive && p.team === 'REBELS' && input && input.interact && this.getBombsiteAtPosition(p.position)) {
+          currentPlanter = p;
+        } else {
+          this.activePlanterId = null;
+          this.plantHoldProgress = 0;
+        }
+      }
 
-      for (const player of Object.values(this.state.players)) {
-        if (!player.isAlive || player.team !== 'REBELS') continue;
-        const input = this.lastPlayerInputs.get(player.id);
-        if (!input || !input.interact) continue;
+      // If no active planter, pick first eligible rebel
+      if (!currentPlanter) {
+        for (const player of Object.values(this.state.players)) {
+          if (!player.isAlive || player.team !== 'REBELS') continue;
+          const input = this.lastPlayerInputs.get(player.id);
+          if (!input || !input.interact) continue;
 
-        // Check if inside Bombsite A or B
-        const site = this.getBombsiteAtPosition(player.position);
+          const site = this.getBombsiteAtPosition(player.position);
+          if (site) {
+            this.activePlanterId = player.id;
+            currentPlanter = player;
+            break;
+          }
+        }
+      }
+
+      if (currentPlanter) {
+        const site = this.getBombsiteAtPosition(currentPlanter.position);
         if (site) {
-          isAnyRebelPlanting = true;
           this.plantHoldProgress += dt / 3.0; // 3 seconds to plant
           if (this.plantHoldProgress >= 1.0) {
             // Bomb planted!
             bomb.isPlanted = true;
             bomb.site = site;
-            bomb.position = [player.position[0], 0.2, player.position[2]];
+            bomb.position = [currentPlanter.position[0], 0.2, currentPlanter.position[2]];
             bomb.plantedAt = now;
-            bomb.planterId = player.id;
+            bomb.planterId = currentPlanter.id;
             bomb.plantTimer = 45;
             this.plantHoldProgress = 0;
+            this.activePlanterId = null;
 
             if (this.onBombPlantedCallback) {
               this.onBombPlantedCallback(site, bomb.position);
@@ -648,13 +734,10 @@ export class GameRoom {
             if (this.onMessageCallback) {
               this.onMessageCallback(`A Mochila Bombástica foi armada no Ponto ${site}! (45s para detonação)`, 'round');
             }
-            break;
           }
         }
-      }
-
-      if (!isAnyRebelPlanting) {
-        this.plantHoldProgress = Math.max(0, this.plantHoldProgress - dt * 1.5);
+      } else {
+        this.plantHoldProgress = Math.max(0, this.plantHoldProgress - dt * 2.0);
       }
     }
 
@@ -676,43 +759,67 @@ export class GameRoom {
       }
 
       // Check if an Inspector is defusing
-      let isAnyInspectorDefusing = false;
-      const [bx, by, bz] = bomb.position;
+      const [bx, , bz] = bomb.position;
+      let currentDefuser: PlayerState | null = null;
 
-      for (const player of Object.values(this.state.players)) {
-        if (!player.isAlive || player.team !== 'INSPECTORS') continue;
-        const input = this.lastPlayerInputs.get(player.id);
-        if (!input || !input.interact) continue;
+      if (this.activeDefuserId) {
+        const p = this.state.players[this.activeDefuserId];
+        const input = this.lastPlayerInputs.get(this.activeDefuserId);
+        if (p && p.isAlive && p.team === 'INSPECTORS' && input && input.interact) {
+          const dx = p.position[0] - bx;
+          const dz = p.position[2] - bz;
+          if (Math.sqrt(dx * dx + dz * dz) <= 2.8) {
+            currentDefuser = p;
+          }
+        }
+        if (!currentDefuser) {
+          this.activeDefuserId = null;
+          this.defuseHoldProgress = 0;
+          bomb.defuseProgress = 0;
+          bomb.defuserId = undefined;
+        }
+      }
 
-        const dx = player.position[0] - bx;
-        const dz = player.position[2] - bz;
-        const dist = Math.sqrt(dx * dx + dz * dz);
-        if (dist <= 2.8) {
-          isAnyInspectorDefusing = true;
-          this.defuseHoldProgress += dt / 5.0; // 5 seconds defuse
-          bomb.defuseProgress = Math.min(1.0, this.defuseHoldProgress);
-          bomb.defuserId = player.id;
+      if (!currentDefuser) {
+        for (const player of Object.values(this.state.players)) {
+          if (!player.isAlive || player.team !== 'INSPECTORS') continue;
+          const input = this.lastPlayerInputs.get(player.id);
+          if (!input || !input.interact) continue;
 
-          if (this.defuseHoldProgress >= 1.0) {
-            // Defused!
-            bomb.isDefused = true;
-            if (this.onBombDefusedCallback) {
-              this.onBombDefusedCallback(player.id);
-            }
-            this.endRound('INSPECTORS', 'A Mochila Bombástica foi desarmada com sucesso pelos Inspetores!');
+          const dx = player.position[0] - bx;
+          const dz = player.position[2] - bz;
+          if (Math.sqrt(dx * dx + dz * dz) <= 2.8) {
+            this.activeDefuserId = player.id;
+            currentDefuser = player;
             break;
           }
         }
       }
 
-      if (!isAnyInspectorDefusing) {
-        this.defuseHoldProgress = Math.max(0, this.defuseHoldProgress - dt * 2.0);
+      if (currentDefuser) {
+        this.defuseHoldProgress += dt / 5.0; // 5 seconds defuse
+        bomb.defuseProgress = Math.min(1.0, this.defuseHoldProgress);
+        bomb.defuserId = currentDefuser.id;
+
+        if (this.defuseHoldProgress >= 1.0) {
+          // Defused!
+          bomb.isDefused = true;
+          this.activeDefuserId = null;
+          if (this.onBombDefusedCallback) {
+            this.onBombDefusedCallback(currentDefuser.id);
+          }
+          this.endRound('INSPECTORS', 'A Mochila Bombástica foi desarmada com sucesso pelos Inspetores!');
+        }
+      } else {
+        this.defuseHoldProgress = Math.max(0, this.defuseHoldProgress - dt * 2.5);
         bomb.defuseProgress = this.defuseHoldProgress;
+        bomb.defuserId = undefined;
       }
 
       // Detonation check
       if (bomb.plantTimer <= 0) {
         bomb.isExploded = true;
+        this.activeDefuserId = null;
         if (this.onBombExplodedCallback) {
           this.onBombExplodedCallback(bomb.position);
         }
@@ -724,11 +831,17 @@ export class GameRoom {
   public getBombsiteAtPosition(pos: [number, number, number]): 'A' | 'B' | null {
     for (const obj of this.mapData.objectives) {
       if (obj.type === 'BOMBSITE_A' || obj.type === 'BOMBSITE_B') {
-        const dx = Math.abs(pos[0] - obj.position[0]);
-        const dz = Math.abs(pos[2] - obj.position[2]);
+        const rx = pos[0] - obj.position[0];
+        const rz = pos[2] - obj.position[2];
+        const rotY = obj.rotation ? obj.rotation[1] : 0;
+        const cosR = Math.cos(-rotY);
+        const sinR = Math.sin(-rotY);
+        const localX = rx * cosR - rz * sinR;
+        const localZ = rx * sinR + rz * cosR;
+
         const halfX = obj.scale[0] / 2 + 1.2;
         const halfZ = obj.scale[2] / 2 + 1.2;
-        if (dx <= halfX && dz <= halfZ) {
+        if (Math.abs(localX) <= halfX && Math.abs(localZ) <= halfZ) {
           return obj.type === 'BOMBSITE_A' ? 'A' : 'B';
         }
       }

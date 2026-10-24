@@ -95,6 +95,13 @@ export default function App() {
   const allPlayersRef = useRef<Record<string, PlayerState>>({});
   const animFrameIdRef = useRef<number>(0);
 
+  const isPausedRef = useRef<boolean>(isPaused);
+  isPausedRef.current = isPaused;
+  const buyMenuOpenRef = useRef<boolean>(buyMenuOpen);
+  buyMenuOpenRef.current = buyMenuOpen;
+  const settingsModalOpenRef = useRef<boolean>(settingsModalOpen);
+  settingsModalOpenRef.current = settingsModalOpen;
+
   // Autostart parameter check
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -366,12 +373,40 @@ export default function App() {
           const moveSpeed = 7.0 * (input.crouch ? 0.45 : input.walk ? 0.52 : 1.0);
           const cosY = Math.cos(controller.yaw);
           const sinY = Math.sin(controller.yaw);
-          const cdx = (input.forward * -sinY + input.right * cosY) * moveSpeed * dt;
-          const cdz = (input.forward * -cosY + input.right * -sinY) * moveSpeed * dt;
-          lp.position[0] += cdx;
-          lp.position[2] += cdz;
-          lp.velocity[0] = cdx / dt;
-          lp.velocity[2] = cdz / dt;
+
+          // Diagonal vector normalization
+          let moveX = input.forward * -sinY + input.right * cosY;
+          let moveZ = input.forward * -cosY + input.right * -sinY;
+          const moveLen = Math.sqrt(moveX * moveX + moveZ * moveZ);
+          if (moveLen > 1.0) {
+            moveX /= moveLen;
+            moveZ /= moveLen;
+          }
+
+          let nextX = lp.position[0] + moveX * moveSpeed * dt;
+          let nextZ = lp.position[2] + moveZ * moveSpeed * dt;
+
+          // Local obstacle collision prediction to prevent visual wall ghosting
+          const map = currentMapDataRef.current;
+          if (map && Array.isArray(map.objects)) {
+            const r = 0.45;
+            for (const obj of map.objects) {
+              if (!obj.collision || obj.type === 'floor' || obj.type === 'ceiling') continue;
+              const minX = obj.position[0] - obj.scale[0] / 2 - r;
+              const maxX = obj.position[0] + obj.scale[0] / 2 + r;
+              const minZ = obj.position[2] - obj.scale[2] / 2 - r;
+              const maxZ = obj.position[2] + obj.scale[2] / 2 + r;
+              if (nextX > minX && nextX < maxX && nextZ > minZ && nextZ < maxZ) {
+                if (lp.position[0] <= minX || lp.position[0] >= maxX) nextX = lp.position[0];
+                if (lp.position[2] <= minZ || lp.position[2] >= maxZ) nextZ = lp.position[2];
+              }
+            }
+          }
+
+          lp.position[0] = nextX;
+          lp.position[2] = nextZ;
+          lp.velocity[0] = moveX * moveSpeed;
+          lp.velocity[2] = moveZ * moveSpeed;
         } else {
           lp.velocity[0] = 0;
           lp.velocity[2] = 0;
@@ -383,8 +418,8 @@ export default function App() {
         renderer.camera.updateProjectionMatrix();
       }
 
-      // Send input to server
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && !isPaused && !buyMenuOpen && !settingsModalOpen) {
+      // Send input to server using up-to-date ref state to eliminate stale closures
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && !isPausedRef.current && !buyMenuOpenRef.current && !settingsModalOpenRef.current) {
         wsRef.current.send(JSON.stringify({
           type: 'player_input',
           payload: input,
@@ -399,11 +434,14 @@ export default function App() {
 
     animFrameIdRef.current = requestAnimationFrame(tick);
 
-    // Pause on Escape listener
+    // Pause / Close menu on Escape listener
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.code === 'Escape') {
-        if (buyMenuOpen) {
+        if (buyMenuOpenRef.current) {
           setBuyMenuOpen(false);
+          controller.requestLock();
+        } else if (settingsModalOpenRef.current) {
+          setSettingsModalOpen(false);
           controller.requestLock();
         } else {
           setIsPaused((prev) => {
@@ -480,17 +518,26 @@ export default function App() {
     setAppMode('playing');
     setIsPaused(false);
 
-    // Add bots on opposite and same team
+    // Add balanced bots for a 2v2 match (1 ally bot, 2 enemy bots)
     setTimeout(() => {
+      const enemyTeam = team === 'INSPECTORS' ? 'REBELS' : 'INSPECTORS';
+      // Enemy bot 1
       fetch('/api/bot/add', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ team: team === 'INSPECTORS' ? 'REBELS' : 'INSPECTORS' }),
+        body: JSON.stringify({ team: enemyTeam }),
       });
+      // Enemy bot 2
       fetch('/api/bot/add', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ team: team === 'INSPECTORS' ? 'REBELS' : 'INSPECTORS' }),
+        body: JSON.stringify({ team: enemyTeam }),
+      });
+      // Ally bot
+      fetch('/api/bot/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ team }),
       });
     }, 1000);
   };
